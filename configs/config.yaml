@@ -1,0 +1,146 @@
+# Project Configuration v2.0
+project:
+  name: "crypto_cascades"
+  version: "2.0.0"
+  description: "FOMO Contagion in Cryptocurrency Networks using SEIR Epidemic Dynamics"
+  
+# Data Sources
+data:
+  # PRIMARY DATASET: ORBITAAL
+  orbitaal:
+    zenodo_base: "https://zenodo.org/records/12581515/files"
+    # Monthly snapshots (main analysis)
+    monthly_archive: "orbitaal-snapshot-month.tar.gz"
+    monthly_size_gb: 23
+    # Sample files (development/testing)
+    samples:
+      - "orbitaal-snapshot-2016_07_08.csv"
+      - "orbitaal-snapshot-2016_07_09.csv"
+      - "orbitaal-stream_graph-2016_07_08.csv"
+      - "orbitaal-stream_graph-2016_07_09.csv"
+    # Node metadata
+    node_table: "orbitaal-nodetable.tar.gz"
+    
+  # SUPPLEMENTARY: Trust Networks
+  snap_bitcoin:
+    otc_url: "https://snap.stanford.edu/data/soc-sign-bitcoin-otc.csv.gz"
+    alpha_url: "https://snap.stanford.edu/data/soc-sign-bitcoin-alpha.csv.gz"
+    
+  # MARKET DATA
+  price:
+    source: "coingecko"
+    coin_id: "bitcoin"
+    vs_currency: "usd"
+    
+  sentiment:
+    source: "alternative.me"
+    api_url: "https://api.alternative.me/fng/"
+
+# Directory paths
+paths:
+  data_raw: "data/raw"
+  data_processed: "data/processed"
+  data_cache: "data/cache"
+  outputs: "outputs"
+  figures: "outputs/figures"
+  reports: "outputs/reports"
+  models: "outputs/models"
+
+# Time Windows for Analysis (ORBITAAL covers 2009-2021)
+# Three-Period Research Design: Training, Control, Validation
+time_windows:
+  development:
+    name: "2016_halving"
+    # Use sample files for development
+    start: "2016-07-08"
+    end: "2016-07-09"
+    type: "dev"
+  training:
+    name: "2017_bull_run"
+    start: "2017-10-01"
+    end: "2018-01-31"
+    type: "bull"
+    description: "Bitcoin's historic bull run to ~$20k"
+  control:
+    name: "2018_bear_market"
+    start: "2018-06-01"
+    end: "2018-12-31"
+    type: "bear"
+    description: "Crypto winter - extended bear market"
+  validation:
+    name: "2020_2021_bull_run"
+    start: "2020-10-01"
+    end: "2021-01-25"  # ORBITAAL ends 2021-01-25
+    type: "bull"
+    description: "Institutional FOMO bull run to ~$40k"
+
+# State Assignment Parameters (adjusted for real timestamps)
+state_assignment:
+  susceptible:
+    no_buy_window_days: 7  # No incoming BTC in past N days
+  exposed:
+    contact_window_hours: 24  # Time window after contact with infected
+  infected:
+    net_positive_threshold: 0.0  # Net BTC flow > threshold = buying
+    min_usd_value: 100  # Minimum USD value to count as significant
+  recovered:
+    dormancy_window_days: 3  # Days without activity after being infected
+
+# SEIR Model Parameters (Initial Guesses)
+seir_model:
+  beta_init: 0.3  # Transmission rate
+  sigma_init: 0.2  # Incubation rate (1/latent period)
+  gamma_init: 0.1  # Recovery rate
+  omega_init: 0.01  # Immunity waning rate
+  fomo_amplification: true  # Enable FOMO factor based on Fear & Greed
+  fomo_alpha: 1.0  # FOMO factor sensitivity
+  
+  # Parameter bounds for estimation
+  bounds:
+    beta: [0.01, 0.5]
+    sigma: [0.05, 0.5]
+    gamma: [0.01, 0.3]
+    omega: [0.001, 0.1]
+
+# Network Analysis Parameters
+network:
+  min_degree: 2  # Minimum degree to include wallet
+  snapshot_frequency: "monthly"  # Use ORBITAAL monthly snapshots
+  use_largest_component: true
+  
+# Computation
+computation:
+  random_seed: 42
+  n_simulations: 100  # Monte Carlo runs
+  n_bootstrap: 100  # Bootstrap resamples for CI
+  parallel_workers: 4
+  chunk_size: 100000  # For processing large parquet files
+  confidence_level: 0.95
+
+# Hypothesis Testing
+hypothesis_testing:
+  alpha: 0.05  # Significance level
+  n_permutations: 1000  # For permutation tests
+  
+# Visualization
+visualization:
+  dpi: 300
+  style: "whitegrid"
+  figsize_main: [12, 8]
+  figsize_multi: [14, 10]
+  colors:
+    susceptible: "#1f77b4"  # Blue
+    exposed: "#ff7f0e"      # Orange
+    infected: "#d62728"     # Red
+    recovered: "#2ca02c"    # Green
+  font_sizes:
+    title: 14
+    label: 12
+    tick: 10
+    legend: 10
+
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "outputs/reports/crypto_cascades.log"
