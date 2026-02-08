@@ -14,7 +14,7 @@ import os
 import tarfile
 import requests
 from pathlib import Path
-from typing import List, Optional, Dict, Generator
+from typing import Any, Callable, Dict, Generator, List, Optional
 import logging
 
 import pandas as pd
@@ -380,6 +380,65 @@ class OrbitaalDownloader:
             for batch in parquet_file.iter_batches(batch_size=chunk_size, columns=columns):
                 yield batch.to_pandas()
         
+    def iter_months_in_range(
+        self,
+        start_date: str,
+        end_date: str,
+        columns: Optional[List[str]] = None,
+        chunk_size: int = 100000
+    ) -> Generator[pd.DataFrame, None, None]:
+        """
+        Generator to iterate over months without loading all into memory.
+        
+        Args:
+            start_date: Start in 'YYYY-MM' format
+            end_date: End in 'YYYY-MM' format
+            columns: Optional list of columns to load
+            chunk_size: Rows per chunk within each month
+            
+        Yields:
+            pd.DataFrame chunks from each month in range
+        """
+        from datetime import datetime as dt
+        
+        start = dt.strptime(start_date, '%Y-%m')
+        end = dt.strptime(end_date, '%Y-%m')
+        
+        current = start
+        while current <= end:
+            for chunk in self.iter_monthly_chunks(
+                current.year, current.month, chunk_size=chunk_size, columns=columns
+            ):
+                yield chunk
+            if current.month == 12:
+                current = current.replace(year=current.year + 1, month=1)
+            else:
+                current = current.replace(month=current.month + 1)
+
+    def load_months_in_range_chunked(
+        self,
+        start_date: str,
+        end_date: str,
+        chunk_processor: Callable[[pd.DataFrame], Any],
+        columns: Optional[List[str]] = None
+    ) -> List[Any]:
+        """
+        Process months in chunks with a custom function, avoiding full memory load.
+        
+        Args:
+            start_date: Start in 'YYYY-MM' format
+            end_date: End in 'YYYY-MM' format
+            chunk_processor: Function to apply to each chunk
+            columns: Optional list of columns to load
+            
+        Returns:
+            List of results from chunk_processor
+        """
+        results = []
+        for chunk in self.iter_months_in_range(start_date, end_date, columns):
+            results.append(chunk_processor(chunk))
+        return results
+
     def get_available_months(self) -> List[str]:
         """
         Get list of available months in extracted data.

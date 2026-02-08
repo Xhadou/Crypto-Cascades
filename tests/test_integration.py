@@ -202,8 +202,10 @@ class TestEndToEndPipeline:
         # Verify all hypotheses were tested
         assert all(f'H{i}' in results for i in range(1, 6))
         
-        # Verify all results are valid
+        # Verify all HypothesisResult entries are valid
         for h_name, result in results.items():
+            if not hasattr(result, 'p_value'):
+                continue  # skip non-HypothesisResult entries like null_comparison
             assert 0 <= result.p_value <= 1 or np.isnan(result.p_value)
             # CI may have NaN for edge cases (e.g., empty samples)
             if not np.isnan(result.confidence_interval[0]) and not np.isnan(result.confidence_interval[1]):

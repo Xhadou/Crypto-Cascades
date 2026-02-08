@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 from scipy.integrate import odeint
-from typing import Dict, List, Optional, Tuple, Union, Callable, Any
+from typing import Dict, List, Optional, Tuple, Union, Callable, Any, Literal, overload
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -330,9 +330,24 @@ class NetworkSEIR:
             counts[state.value] += 1
         return counts
     
-    def compute_network_r0(self, G: nx.Graph) -> float:
+    @overload
+    def compute_network_r0(
+        self, G: nx.Graph, n_bootstrap: int = ..., *, return_ci: Literal[False] = ...
+    ) -> float: ...
+
+    @overload
+    def compute_network_r0(
+        self, G: nx.Graph, n_bootstrap: int = ..., *, return_ci: Literal[True] = ...
+    ) -> Tuple[float, Tuple[float, float]]: ...
+
+    def compute_network_r0(
+        self,
+        G: nx.Graph,
+        n_bootstrap: int = 0,
+        return_ci: bool = False
+    ) -> Union[float, Tuple[float, Tuple[float, float]]]:
         """
-        Compute network-adjusted R₀.
+        Compute network-adjusted R₀ with optional bootstrap CI.
 
         For networks: R₀_network = (β/γ) × <k²>/<k>
 
@@ -340,24 +355,32 @@ class NetworkSEIR:
 
         Args:
             G: NetworkX graph
+            n_bootstrap: Number of bootstrap samples for CI (0 = no CI)
+            return_ci: Whether to return confidence interval tuple
 
         Returns:
-            Network-adjusted R₀
+            If return_ci=False: Network-adjusted R₀ (float)
+            If return_ci=True: Tuple of (R₀, (lower_CI, upper_CI))
         """
         degrees = [d for _, d in G.degree()]  # type: ignore[misc]
 
         if len(degrees) == 0:
-            return 0.0
+            return (0.0, (0.0, 0.0)) if return_ci else 0.0
 
         k_mean = np.mean(degrees)
         k2_mean = np.mean([d**2 for d in degrees])
 
         if k_mean == 0:
-            return 0.0
+            return (0.0, (0.0, 0.0)) if return_ci else 0.0
 
         r0_basic = self.params.beta / self.params.gamma
-        network_factor = k2_mean / k_mean
 
+        def compute_r0_from_degrees(deg_list: List[int]) -> float:
+            km = np.mean(deg_list)
+            k2m = np.mean([d**2 for d in deg_list])
+            return float(r0_basic * (k2m / km)) if km > 0 else 0.0
+
+        network_factor = k2_mean / k_mean
         r0_network = r0_basic * network_factor
 
         self.logger.info(
@@ -366,7 +389,21 @@ class NetworkSEIR:
             f"R₀_network = {r0_network:.3f}"
         )
 
-        return float(r0_network)
+        if not return_ci or n_bootstrap == 0:
+            return float(r0_network)
+
+        # Bootstrap CI
+        r0_samples = []
+        for _ in range(n_bootstrap):
+            boot_degrees = np.random.choice(degrees, len(degrees), replace=True).tolist()
+            r0_samples.append(compute_r0_from_degrees(boot_degrees))
+
+        ci = (float(np.percentile(r0_samples, 2.5)),
+              float(np.percentile(r0_samples, 97.5)))
+
+        self.logger.info(f"R₀_network 95% CI: [{ci[0]:.3f}, {ci[1]:.3f}]")
+
+        return float(r0_network), ci
 
     def compute_time_varying_r0(
         self,
@@ -439,21 +476,29 @@ class NetworkSEIR:
                     R_t = np.nan
                     R_t_adjusted = np.nan
 
-                # Bootstrap CI
+                # Bootstrap CI - align arrays before bootstrapping
                 if I_mean > 0 and len(I_window) > 0 and len(new_inf_window) > 0:
-                    R_t_samples = []
-                    for _ in range(100):
-                        boot_idx = np.random.choice(len(I_window), len(I_window), replace=True)
-                        boot_I = np.mean(I_window[boot_idx])
-                        boot_new = np.sum(new_inf_window[boot_idx % len(new_inf_window)]) if len(new_inf_window) > 0 else 0
-                        if boot_I > 0:
-                            R_t_samples.append((boot_new / window_size) / (self.params.gamma * boot_I))
-
-                    if R_t_samples:
-                        R_t_lower = np.percentile(R_t_samples, 2.5)
-                        R_t_upper = np.percentile(R_t_samples, 97.5)
-                    else:
+                    # Align arrays to the same length to avoid index bias
+                    min_len = min(len(I_window), len(new_inf_window))
+                    if min_len < 2:
                         R_t_lower = R_t_upper = R_t
+                    else:
+                        I_aligned = I_window[:min_len]
+                        new_inf_aligned = new_inf_window[:min_len]
+
+                        R_t_samples = []
+                        for _ in range(100):
+                            boot_idx = np.random.choice(min_len, min_len, replace=True)
+                            boot_I = np.mean(I_aligned[boot_idx])
+                            boot_new = np.sum(new_inf_aligned[boot_idx])
+                            if boot_I > 0:
+                                R_t_samples.append((boot_new / window_size) / (self.params.gamma * boot_I))
+
+                        if R_t_samples:
+                            R_t_lower = np.percentile(R_t_samples, 2.5)
+                            R_t_upper = np.percentile(R_t_samples, 97.5)
+                        else:
+                            R_t_lower = R_t_upper = R_t
                 else:
                     R_t_lower = R_t_upper = np.nan
 
@@ -486,7 +531,9 @@ class NetworkSEIR:
         initial_infected: List[int],
         t_max: float,
         fgi_values: Optional[np.ndarray] = None,
-        record_interval: float = 1.0
+        record_interval: float = 1.0,
+        early_termination: bool = True,
+        min_infected_for_continuation: int = 0
     ) -> pd.DataFrame:
         """
         Run continuous-time stochastic simulation using Gillespie algorithm.
@@ -500,6 +547,8 @@ class NetworkSEIR:
             t_max: Maximum simulation time
             fgi_values: Optional FGI values (indexed by integer time)
             record_interval: Time interval for recording state counts
+            early_termination: Whether to stop when epidemic dies out
+            min_infected_for_continuation: Min infected+exposed to continue
 
         Returns:
             DataFrame with state counts over time
@@ -507,6 +556,15 @@ class NetworkSEIR:
         self.logger.info(
             f"Running Gillespie simulation (N={G.number_of_nodes():,}, T={t_max})"
         )
+
+        # Validate graph connectivity
+        undirected_G = G.to_undirected() if G.is_directed() else G
+        if not nx.is_connected(undirected_G):
+            n_components = nx.number_connected_components(undirected_G)
+            self.logger.warning(
+                f"Graph is disconnected ({n_components} components). "
+                "Simulation may not reach all nodes."
+            )
 
         # Initialize node states
         node_states = {node: State.SUSCEPTIBLE for node in G.nodes()}
@@ -542,6 +600,15 @@ class NetworkSEIR:
 
         while t < t_max and iteration < max_iterations:
             iteration += 1
+
+            # Early termination check
+            if early_termination:
+                if len(I_nodes) == 0 and len(E_nodes) == 0:
+                    self.logger.info(f"Epidemic died out at t={t:.2f}")
+                    break
+                if len(I_nodes) <= min_infected_for_continuation and len(E_nodes) == 0:
+                    self.logger.info(f"Below continuation threshold at t={t:.2f}")
+                    break
 
             # Get effective beta based on current FGI
             if fgi_values is not None and int(t) < len(fgi_values):
@@ -642,6 +709,16 @@ class NetworkSEIR:
                 'R': len(R_nodes)
             })
 
+        # Pad results to t_max if terminated early
+        if results and results[-1]['t'] < t_max:
+            final_state = results[-1].copy()
+            pad_time = final_state['t'] + record_interval
+            while pad_time <= t_max:
+                padded = final_state.copy()
+                padded['t'] = pad_time
+                results.append(padded)
+                pad_time += record_interval
+
         df = pd.DataFrame(results)
 
         # Add fractions
@@ -717,6 +794,126 @@ class NetworkSEIR:
         
         stats['t'] = np.arange(t_max)
         stats['n_simulations'] = n_simulations
+        
+        return stats
+
+    def _single_mc_simulation(
+        self,
+        G: nx.Graph,
+        initial_infected_count: int,
+        t_max: int,
+        fgi_values: Optional[np.ndarray],
+        run_idx: int
+    ) -> pd.DataFrame:
+        """
+        Execute a single Monte Carlo simulation (picklable for multiprocessing).
+        
+        Args:
+            G: NetworkX graph
+            initial_infected_count: Number of initial infected
+            t_max: Maximum time
+            fgi_values: Fear & Greed Index values
+            run_idx: Index for random seed offset
+            
+        Returns:
+            DataFrame with simulation results for this run
+        """
+        nodes = list(G.nodes())
+        np.random.seed(self.random_seed + run_idx)
+        initial_infected = np.random.choice(
+            nodes,
+            size=min(initial_infected_count, len(nodes)),
+            replace=False
+        ).tolist()
+        
+        df = self.simulate_network_stochastic(
+            G, initial_infected, t_max, fgi_values
+        )
+        df['run'] = run_idx
+        return df
+
+    def run_monte_carlo_parallel(
+        self,
+        G: nx.Graph,
+        initial_infected_count: int,
+        t_max: int,
+        n_simulations: int = 100,
+        fgi_values: Optional[np.ndarray] = None,
+        n_workers: Optional[int] = None
+    ) -> Dict:
+        """
+        Run Monte Carlo simulations using parallel workers.
+        
+        Falls back to sequential execution if n_workers=1 or
+        if the concurrent.futures import fails.
+        
+        Args:
+            G: NetworkX graph
+            initial_infected_count: Number of initial infected
+            t_max: Maximum time
+            n_simulations: Number of simulation runs
+            fgi_values: Fear & Greed Index values
+            n_workers: Number of parallel workers (None = cpu_count)
+            
+        Returns:
+            Dict with mean, std, and percentiles for each state
+        """
+        import os as _os
+        if n_workers is None:
+            n_workers = min(_os.cpu_count() or 4, n_simulations)
+        
+        if n_workers <= 1:
+            return self.run_monte_carlo(
+                G, initial_infected_count, t_max, n_simulations, fgi_values
+            )
+        
+        self.logger.info(
+            f"Running {n_simulations} Monte Carlo simulations "
+            f"with {n_workers} workers..."
+        )
+        
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        
+        all_results: List[pd.DataFrame] = []
+        
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {
+                executor.submit(
+                    self._single_mc_simulation,
+                    G, initial_infected_count, t_max, fgi_values, i
+                ): i
+                for i in range(n_simulations)
+            }
+            for future in as_completed(futures):
+                try:
+                    all_results.append(future.result())
+                except Exception as e:
+                    run_i = futures[future]
+                    self.logger.warning(
+                        f"Monte Carlo run {run_i} failed: {e}"
+                    )
+        
+        if not all_results:
+            self.logger.error("All Monte Carlo simulations failed")
+            return {}
+        
+        combined = pd.concat(all_results, ignore_index=True)
+        
+        stats = {}
+        for col in ['S_frac', 'E_frac', 'I_frac', 'R_frac']:
+            grouped = combined.groupby('t')[col]
+            stats[col] = {
+                'mean': grouped.mean().values,
+                'std': grouped.std().values,
+                'q05': grouped.quantile(0.05).values,
+                'q25': grouped.quantile(0.25).values,
+                'q50': grouped.quantile(0.50).values,
+                'q75': grouped.quantile(0.75).values,
+                'q95': grouped.quantile(0.95).values,
+            }
+        
+        stats['t'] = np.arange(t_max)
+        stats['n_simulations'] = len(all_results)
         
         return stats
     

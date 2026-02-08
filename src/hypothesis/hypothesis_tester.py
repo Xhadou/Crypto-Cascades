@@ -79,7 +79,8 @@ class HypothesisTester:
         estimated_params: EstimationResult,
         observed_data: Optional[pd.DataFrame] = None,
         apply_correction: bool = True,
-        correction_method: str = 'fdr_bh'
+        correction_method: str = 'fdr_bh',
+        infection_times_df: Optional[pd.DataFrame] = None
     ) -> Dict[str, HypothesisResult]:
         """
         Run all hypothesis tests.
@@ -92,6 +93,7 @@ class HypothesisTester:
             observed_data: Optional observed SEIR data
             apply_correction: Whether to apply multiple testing correction
             correction_method: Correction method ('bonferroni', 'holm', 'fdr_bh')
+            infection_times_df: Optional DataFrame with per-node infection times for H4 test
 
         Returns:
             Dict mapping hypothesis name to result
@@ -113,7 +115,7 @@ class HypothesisTester:
         )
 
         results['H4'] = self.test_h4_centrality_effect(
-            G, state_history
+            G, state_history, infection_times_df=infection_times_df
         )
 
         results['H5'] = self.test_h5_community_clustering(
@@ -121,6 +123,16 @@ class HypothesisTester:
         )
 
         self.logger.info("All hypothesis tests complete.")
+
+        # Add null model comparison as sanity check
+        if G.number_of_nodes() < 5000:
+            try:
+                null_comparison = self.compare_against_null_networks(
+                    G, estimated_params, n_null_networks=50
+                )
+                results['null_comparison'] = null_comparison
+            except Exception as e:
+                self.logger.warning(f"Null model comparison failed: {e}")
 
         # Apply multiple testing correction
         if apply_correction:
@@ -148,12 +160,14 @@ class HypothesisTester:
         """
         self.logger.info(f"Applying {method} multiple testing correction...")
 
-        # Extract p-values (skip NaN/inconclusive)
+        # Extract p-values (skip NaN/inconclusive and non-HypothesisResult entries)
         hypotheses = sorted(results.keys())
         p_values = []
         valid_hypotheses = []
 
         for h in hypotheses:
+            if not isinstance(results[h], HypothesisResult):
+                continue
             p = results[h].p_value
             if np.isfinite(p):
                 p_values.append(p)
@@ -355,6 +369,7 @@ class HypothesisTester:
 
         # Store model fits
         model_results = {}
+        fitting_diagnostics = {}
 
         # --- Model 1: SEIR (use provided parameters) ---
         seir_params = estimated_params.to_params()
@@ -374,12 +389,14 @@ class HypothesisTester:
                 'n_params': 3,
                 'fitted': I_seir
             }
+            fitting_diagnostics['SEIR'] = {'status': 'success', 'sse': float(seir_sse)}
         except Exception as e:
             self.logger.warning(f"SEIR fitting failed: {e}")
             model_results['SEIR'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 3}
+            fitting_diagnostics['SEIR'] = {'status': 'failed', 'error': str(e)}
 
         # --- Model 2: Exponential growth ---
-        def exponential(t, a, r):
+        def exponential(t: np.ndarray, a: float, r: float) -> np.ndarray:
             return a * np.exp(r * t)
 
         try:
@@ -390,12 +407,14 @@ class HypothesisTester:
             exp_sse = np.sum((I_obs - I_exp)**2)
             exp_aic = self._compute_aic(exp_sse, n_params=2, n_obs=len(t))
             model_results['Exponential'] = {'sse': exp_sse, 'aic': exp_aic, 'n_params': 2}
+            fitting_diagnostics['Exponential'] = {'status': 'success', 'sse': float(exp_sse)}
         except Exception as e:
             self.logger.warning(f"Exponential fitting failed: {e}")
             model_results['Exponential'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 2}
+            fitting_diagnostics['Exponential'] = {'status': 'failed', 'error': str(e)}
 
         # --- Model 3: Logistic growth ---
-        def logistic(t, K, r, t0):
+        def logistic(t: np.ndarray, K: float, r: float, t0: float) -> np.ndarray:
             return K / (1 + np.exp(-r * (t - t0)))
 
         try:
@@ -406,12 +425,14 @@ class HypothesisTester:
             log_sse = np.sum((I_obs - I_log)**2)
             log_aic = self._compute_aic(log_sse, n_params=3, n_obs=len(t))
             model_results['Logistic'] = {'sse': log_sse, 'aic': log_aic, 'n_params': 3}
+            fitting_diagnostics['Logistic'] = {'status': 'success', 'sse': float(log_sse)}
         except Exception as e:
             self.logger.warning(f"Logistic fitting failed: {e}")
             model_results['Logistic'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 3}
+            fitting_diagnostics['Logistic'] = {'status': 'failed', 'error': str(e)}
 
         # --- Model 4: Linear growth ---
-        def linear(t, a, b):
+        def linear(t: np.ndarray, a: float, b: float) -> np.ndarray:
             return a + b * t
 
         try:
@@ -420,9 +441,11 @@ class HypothesisTester:
             lin_sse = np.sum((I_obs - I_lin)**2)
             lin_aic = self._compute_aic(lin_sse, n_params=2, n_obs=len(t))
             model_results['Linear'] = {'sse': lin_sse, 'aic': lin_aic, 'n_params': 2}
+            fitting_diagnostics['Linear'] = {'status': 'success', 'sse': float(lin_sse)}
         except Exception as e:
             self.logger.warning(f"Linear fitting failed: {e}")
             model_results['Linear'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 2}
+            fitting_diagnostics['Linear'] = {'status': 'failed', 'error': str(e)}
 
         # --- Compare models ---
         valid_models = {k: v for k, v in model_results.items() if np.isfinite(v['aic'])}
@@ -484,6 +507,13 @@ class HypothesisTester:
                 'best_model': best_model,
                 'seir_r_squared': seir_r2,
                 'seir_delta_aic': seir_delta_aic,
+                'fitting_diagnostics': fitting_diagnostics,
+                'data_quality': {
+                    'n_observations': len(t),
+                    'has_nan': bool(np.any(np.isnan(I_obs))),
+                    'variance': float(np.var(I_obs)),
+                    'range': (float(I_obs.min()), float(I_obs.max()))
+                },
                 'interpretation': f"SEIR {'is' if seir_supported else 'is NOT'} the best model (ΔAIC={seir_delta_aic:.2f})"
             }
         )
@@ -542,11 +572,11 @@ class HypothesisTester:
 
         # Compute observed R₀
         model = NetworkSEIR(estimated_params.to_params())
-        observed_r0 = model.compute_network_r0(G)
+        observed_r0: float = float(model.compute_network_r0(G))
 
         n = G.number_of_nodes()
         m = G.number_of_edges()
-        degrees = [d for _, d in G.degree()]
+        degrees = [d for _, d in G.degree()]  # type: ignore[misc]
 
         null_r0s: Dict[str, List[float]] = {nt: [] for nt in null_types}
 
@@ -556,7 +586,7 @@ class HypothesisTester:
             if 'erdos_renyi' in null_types:
                 try:
                     G_er = nx.gnm_random_graph(n, m, seed=seed)
-                    null_r0s['erdos_renyi'].append(model.compute_network_r0(G_er))
+                    null_r0s['erdos_renyi'].append(float(model.compute_network_r0(G_er)))
                 except Exception:
                     pass
 
@@ -566,7 +596,7 @@ class HypothesisTester:
                     G_config = nx.configuration_model(degrees, seed=seed)
                     G_config = nx.Graph(G_config)  # Remove multi-edges
                     G_config.remove_edges_from(nx.selfloop_edges(G_config))
-                    null_r0s['configuration'].append(model.compute_network_r0(G_config))
+                    null_r0s['configuration'].append(float(model.compute_network_r0(G_config)))
                 except Exception:
                     pass
 
@@ -575,7 +605,7 @@ class HypothesisTester:
                     # Double-edge swap preserves degree sequence exactly
                     G_rewired = G.copy()
                     nx.double_edge_swap(G_rewired, nswap=m*2, max_tries=m*20, seed=seed)
-                    null_r0s['rewired'].append(model.compute_network_r0(G_rewired))
+                    null_r0s['rewired'].append(float(model.compute_network_r0(G_rewired)))
                 except Exception:
                     pass
 
@@ -703,13 +733,19 @@ class HypothesisTester:
     def test_h3_fgi_correlation(
         self,
         state_history: pd.DataFrame,
-        fgi_values: np.ndarray
+        fgi_values: np.ndarray,
+        max_lag: int = 7
     ) -> HypothesisResult:
         """
         H3: Fear & Greed Index correlates with transmission.
         
-        Test: Correlation between FGI and infection rate.
+        Test: Correlation between FGI and infection rate with lag analysis.
         Null hypothesis: ρ = 0 (no correlation)
+        
+        Args:
+            state_history: DataFrame with state transitions over time
+            fgi_values: Fear & Greed Index time series
+            max_lag: Maximum number of lag days to test
         """
         self.logger.info("Testing H3: FGI correlates with transmission...")
         
@@ -729,13 +765,40 @@ class HypothesisTester:
         
         # Compute change in infections
         delta_infections = np.diff(np.asarray(infections))
-        fgi_aligned = fgi[:-1]  # Align with deltas
         
-        # Spearman correlation (robust to non-normality)
+        # Lag analysis: test correlations at multiple lags
+        best_lag = 0
+        best_corr = 0.0
+        lag_results = {}
+        
+        for lag in range(0, max_lag + 1):
+            if lag > 0:
+                fgi_lagged = fgi[:-lag]
+                infections_lagged = delta_infections[lag:]
+            else:
+                fgi_lagged = fgi[:-1]  # Align with deltas
+                infections_lagged = delta_infections
+            
+            # Align lengths
+            lag_min_len = min(len(fgi_lagged), len(infections_lagged))
+            if lag_min_len < 10:
+                continue
+            
+            corr_result = spearmanr(fgi_lagged[:lag_min_len], infections_lagged[:lag_min_len])
+            corr_val = float(corr_result.statistic if hasattr(corr_result, 'statistic') else corr_result[0])  # type: ignore[arg-type]
+            p_val = float(corr_result.pvalue if hasattr(corr_result, 'pvalue') else corr_result[1])  # type: ignore[arg-type]
+            lag_results[lag] = {'correlation': corr_val, 'p_value': p_val}
+            
+            if abs(corr_val) > abs(best_corr):
+                best_corr = corr_val
+                best_lag = lag
+        
+        # Use lag-0 for main result (backward compatible), but report best lag
+        fgi_aligned = fgi[:-1]
         if len(delta_infections) > 10:
-            corr_result = spearmanr(fgi_aligned, delta_infections)
-            corr = float(getattr(corr_result, 'correlation', corr_result[0]))  # type: ignore[arg-type]
-            p_value = float(getattr(corr_result, 'pvalue', corr_result[1]))  # type: ignore[arg-type]
+            corr_result = spearmanr(fgi_aligned, delta_infections[:len(fgi_aligned)])
+            corr = float(corr_result.statistic if hasattr(corr_result, 'statistic') else corr_result[0])  # type: ignore[arg-type]
+            p_value = float(corr_result.pvalue if hasattr(corr_result, 'pvalue') else corr_result[1])  # type: ignore[arg-type]
         else:
             corr, p_value = 0.0, 1.0
         
@@ -773,20 +836,30 @@ class HypothesisTester:
                 'spearman_rho': float(corr),
                 'mean_fgi': float(np.mean(fgi)),
                 'fgi_std': float(np.std(fgi)),
-                'infection_trend': infection_trend
+                'infection_trend': infection_trend,
+                'optimal_lag_days': best_lag,
+                'lag_analysis': lag_results,
+                'best_lag_correlation': float(best_corr),
             }
         )
     
     def test_h4_centrality_effect(
         self,
         G: nx.Graph,
-        state_history: pd.DataFrame
+        state_history: pd.DataFrame,
+        infection_times_df: Optional[pd.DataFrame] = None
     ) -> HypothesisResult:
         """
         H4: High-centrality nodes accelerate spread.
 
         Test: Compare infection time of high vs low centrality nodes.
         Null hypothesis: No difference in infection timing
+
+        Args:
+            G: Transaction network
+            state_history: DataFrame with state transitions over time
+            infection_times_df: Optional DataFrame with 'node' and 'infection_time' columns
+                               from StateAssigner.get_infection_times_df()
         """
         self.logger.info("Testing H4: High-centrality nodes accelerate spread...")
 
@@ -797,12 +870,27 @@ class HypothesisTester:
         if not centrality:
             centrality = nx.degree_centrality(G)
 
-        # Get infection times from state history
-        # CRITICAL: Require real data, do not generate mock data
-        if 'node' not in state_history.columns or 'infection_time' not in state_history.columns:
+        # Get infection times: prefer separately-passed infection_times_df,
+        # then check state_history columns
+        has_infection_data = False
+        infection_times: Dict = {}
+
+        if infection_times_df is not None and not infection_times_df.empty:
+            if 'node' in infection_times_df.columns and 'infection_time' in infection_times_df.columns:
+                infection_times = dict(zip(infection_times_df['node'], infection_times_df['infection_time']))
+                has_infection_data = True
+                self.logger.info(f"Using {len(infection_times)} node infection times from StateAssigner")
+        
+        if not has_infection_data:
+            if 'node' in state_history.columns and 'infection_time' in state_history.columns:
+                infection_times = dict(zip(state_history['node'], state_history['infection_time']))
+                has_infection_data = True
+
+        if not has_infection_data:
             self.logger.warning(
-                "H4 test requires 'node' and 'infection_time' columns in state_history. "
-                "Returning inconclusive result."
+                "H4 test requires infection time data. Pass infection_times_df from "
+                "StateAssigner.get_infection_times_df() or include 'node' and 'infection_time' "
+                "columns in state_history. Returning inconclusive result."
             )
             return HypothesisResult(
                 hypothesis="H4",
@@ -816,13 +904,10 @@ class HypothesisTester:
                 sample_size=0,
                 additional_metrics={
                     'reason': 'missing_infection_time_data',
-                    'required_columns': ['node', 'infection_time'],
+                    'infection_times_df_provided': infection_times_df is not None,
                     'available_columns': list(state_history.columns)
                 }
             )
-
-        # Extract infection times from real data
-        infection_times = dict(zip(state_history['node'], state_history['infection_time']))
 
         # Filter to nodes that exist in both graph and infection data
         nodes = [n for n in G.nodes() if n in infection_times and n in centrality]
@@ -1041,15 +1126,18 @@ class HypothesisTester:
         report.append("=" * 70)
         report.append(f"Significance level: α = {self.alpha}")
 
+        # Filter to only HypothesisResult entries
+        hr_results = {k: v for k, v in results.items() if isinstance(v, HypothesisResult)}
+
         # Check if correction was applied
-        first_result = next(iter(results.values()))
-        if 'correction_method' in first_result.additional_metrics:
+        first_result = next(iter(hr_results.values()), None)
+        if first_result and 'correction_method' in first_result.additional_metrics:
             method = first_result.additional_metrics['correction_method']
             report.append(f"Multiple testing correction: {method.upper()}")
         report.append("")
 
-        for h_name in sorted(results.keys()):
-            result = results[h_name]
+        for h_name in sorted(hr_results.keys()):
+            result = hr_results[h_name]
             report.append("-" * 70)
 
             # Check for adjusted values
@@ -1093,19 +1181,19 @@ class HypothesisTester:
         report.append("=" * 70)
 
         # Count rejections (use adjusted if available)
-        n_rejected_orig = sum(1 for r in results.values() if r.reject_null)
+        n_rejected_orig = sum(1 for r in hr_results.values() if r.reject_null)
         n_rejected_adj = sum(
-            1 for r in results.values()
+            1 for r in hr_results.values()
             if r.additional_metrics.get('reject_null_adjusted', r.reject_null)
         )
 
-        if any('p_value_adjusted' in r.additional_metrics for r in results.values()):
-            report.append(f"Hypotheses supported (original): {n_rejected_orig}/{len(results)}")
-            report.append(f"Hypotheses supported (adjusted): {n_rejected_adj}/{len(results)}")
+        if any('p_value_adjusted' in r.additional_metrics for r in hr_results.values()):
+            report.append(f"Hypotheses supported (original): {n_rejected_orig}/{len(hr_results)}")
+            report.append(f"Hypotheses supported (adjusted): {n_rejected_adj}/{len(hr_results)}")
         else:
-            report.append(f"Hypotheses supported: {n_rejected_orig}/{len(results)}")
+            report.append(f"Hypotheses supported: {n_rejected_orig}/{len(hr_results)}")
 
-        for h_name, result in sorted(results.items()):
+        for h_name, result in sorted(hr_results.items()):
             reject_adj = result.additional_metrics.get('reject_null_adjusted', result.reject_null)
             status = "✓ Supported" if reject_adj else "✗ Not supported"
             p_adj = result.additional_metrics.get('p_value_adjusted', result.p_value)

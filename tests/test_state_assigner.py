@@ -284,8 +284,9 @@ class TestImmunityWaning:
         G = nx.Graph()
         G.add_node(0)
 
-        # Set recovery time to exactly 30 days ago
-        recovery_time = datetime.now() - timedelta(days=30)
+        # Use a fixed reference time to avoid timing drift between setup and call
+        now = datetime.now()
+        recovery_time = now - timedelta(days=30)
         assigner.recovery_times[0] = recovery_time
 
         new_state = assigner._compute_new_state(
@@ -294,7 +295,7 @@ class TestImmunityWaning:
             is_buying=False,
             G=G,
             infected_wallets=set(),
-            current_time=datetime.now()
+            current_time=now
         )
 
         # At exactly the boundary, should still be RECOVERED (> not >=)

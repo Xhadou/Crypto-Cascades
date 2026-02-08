@@ -15,6 +15,7 @@ import logging
 from tqdm import tqdm
 
 from src.utils.logger import get_logger
+from src.utils.exceptions import DataLoadError, DataValidationError, InsufficientDataError
 
 
 class OrbitaalParser:
@@ -192,8 +193,7 @@ class OrbitaalParser:
         self.logger.info(f"Loading snapshot from {filepath}")
 
         if not filepath.exists():
-            self.logger.error(f"File not found: {filepath}")
-            return pd.DataFrame()
+            raise DataLoadError(str(filepath), "File not found")
 
         if filepath.suffix == '.parquet':
             df = pd.read_parquet(filepath)
@@ -207,14 +207,16 @@ class OrbitaalParser:
         if validate:
             is_valid, issues, df = self.validate_transactions(df, strict=False)
             if not is_valid:
-                self.logger.error(f"Validation failed for {filepath}")
-                return pd.DataFrame()
+                raise DataValidationError(issues)
 
         # Filter by value
         if min_usd_value > 0 and 'usd_value' in df.columns:
             df = df[df['usd_value'] >= min_usd_value]
         if min_btc_value > 0 and 'btc_value' in df.columns:
             df = df[df['btc_value'] >= min_btc_value]
+
+        if len(df) < 10:
+            raise InsufficientDataError(required=10, available=len(df), data_type="transactions")
 
         self.logger.info(f"Loaded {len(df):,} edges from snapshot")
         return df
@@ -247,8 +249,7 @@ class OrbitaalParser:
         self.logger.info(f"Loading stream from {filepath}")
 
         if not filepath.exists():
-            self.logger.error(f"File not found: {filepath}")
-            return pd.DataFrame()
+            raise DataLoadError(str(filepath), "File not found")
 
         if filepath.suffix == '.parquet':
             df = pd.read_parquet(filepath)
@@ -262,8 +263,7 @@ class OrbitaalParser:
         if validate:
             is_valid, _, df = self.validate_transactions(df, strict=False)
             if not is_valid:
-                self.logger.error(f"Validation failed for {filepath}")
-                return pd.DataFrame()
+                raise DataValidationError(["Stream validation failed for " + str(filepath)])
 
         # Convert timestamp to datetime
         if 'timestamp' in df.columns:

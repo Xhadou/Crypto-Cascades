@@ -449,8 +449,13 @@ class CryptoCascadesPipeline:
             )
             # Convert to node states dict - get final state for each wallet
             self._node_states = assigner.wallet_states
+            
+            # Store reference and infection times for H4 hypothesis test
+            self._state_assigner = assigner
+            self._infection_times_df = assigner.get_infection_times_df()
         else:
             self._node_states = {}
+            self._infection_times_df = pd.DataFrame(columns=['node', 'infection_time'])
         
         state_counts = {}
         for state in self._node_states.values():
@@ -630,6 +635,11 @@ class CryptoCascadesPipeline:
         # Create state history DataFrame
         state_history = self._seir_results.copy()
         
+        # Merge infection times for H4 test if available
+        infection_times_df = getattr(self, '_infection_times_df', pd.DataFrame())
+        if not infection_times_df.empty:
+            self.logger.info(f"Including {len(infection_times_df)} node infection times for H4 test")
+        
         # Prepare FGI array
         fgi_array = np.asarray(self._fgi_values) if self._fgi_values is not None else np.array([50.0])
         
@@ -640,7 +650,8 @@ class CryptoCascadesPipeline:
                 state_history,
                 fgi_array,
                 self._estimated_params,
-                observed_data=self._seir_results
+                observed_data=self._seir_results,
+                infection_times_df=infection_times_df
             )
         else:
             self._hypothesis_results = {}
@@ -659,8 +670,9 @@ class CryptoCascadesPipeline:
                     state_history, fgi_array
                 )
             elif hypothesis == 'H4':
+                infection_times_df = getattr(self, '_infection_times_df', pd.DataFrame())
                 self._hypothesis_results['H4'] = tester.test_h4_centrality_effect(
-                    self._graph, state_history
+                    self._graph, state_history, infection_times_df=infection_times_df
                 )
             elif hypothesis == 'H5':
                 self._hypothesis_results['H5'] = tester.test_h5_community_clustering(
@@ -918,7 +930,102 @@ class CryptoCascadesPipeline:
         self.logger.info("=" * 60)
         
         return period_results
+
+    # ------------------------------------------------------------------
+    # Checkpoint / Resume support
+    # ------------------------------------------------------------------
+    PHASE_ORDER = [
+        'download', 'preprocess', 'analyze',
+        'simulate', 'estimate', 'test', 'visualize'
+    ]
+
+    def _checkpoint_path(self) -> Path:
+        return self.output_dir / '.pipeline_checkpoint.json'
+
+    def _save_checkpoint(self, phase: str, extra: Optional[Dict] = None) -> None:
+        """Persist the last completed phase to disk."""
+        import json
+        payload = {
+            'last_completed_phase': phase,
+            'timestamp': datetime.now().isoformat(),
+            'random_seed': self.random_seed,
+        }
+        if extra:
+            payload.update(extra)
+        self._checkpoint_path().write_text(json.dumps(payload, indent=2))
+        self.logger.info(f"Checkpoint saved after phase: {phase}")
+
+    def _load_checkpoint(self) -> Optional[str]:
+        """Load the last completed phase from a checkpoint file, if any."""
+        import json
+        cp = self._checkpoint_path()
+        if not cp.exists():
+            return None
+        try:
+            data = json.loads(cp.read_text())
+            phase = data.get('last_completed_phase')
+            self.logger.info(f"Resuming after phase: {phase}")
+            return phase
+        except Exception as e:
+            self.logger.warning(f"Could not read checkpoint: {e}")
+            return None
+
+    def run_with_checkpoints(
+        self,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        n_simulations: int = 100,
+        resume: bool = True
+    ) -> None:
+        """
+        Run the full pipeline with checkpoint/resume support.
         
+        If *resume* is True and a checkpoint file exists, phases that
+        already completed are skipped.
+        
+        Args:
+            start_date: Optional start date override
+            end_date: Optional end date override
+            n_simulations: Number of Monte Carlo simulations
+            resume: Whether to resume from a checkpoint
+        """
+        last_done: Optional[str] = self._load_checkpoint() if resume else None
+        skip = last_done is not None
+
+        phase_runners = {
+            'download': lambda: self.run_download(),
+            'preprocess': lambda: self.run_preprocess(start_date, end_date),
+            'analyze': lambda: self.run_analyze(),
+            'simulate': lambda: self.run_simulate(n_simulations),
+            'estimate': lambda: self.run_estimate(),
+            'test': lambda: self.run_test(),
+            'visualize': lambda: self.run_visualize(),
+        }
+
+        for phase in self.PHASE_ORDER:
+            if skip:
+                if phase == last_done:
+                    skip = False        # next phase will run
+                self.logger.info(f"Skipping already-completed phase: {phase}")
+                continue
+
+            self.logger.info(f"Running phase: {phase}")
+            try:
+                phase_runners[phase]()
+                self._save_checkpoint(phase)
+            except Exception as e:
+                self.logger.error(
+                    f"Phase '{phase}' failed: {e}. "
+                    f"Re-run with resume=True to continue."
+                )
+                raise
+
+        # Cleanup checkpoint on full success
+        cp = self._checkpoint_path()
+        if cp.exists():
+            cp.unlink()
+            self.logger.info("Pipeline completed — checkpoint removed.")
+
     def _create_sample_transactions(self) -> pd.DataFrame:
         """Create sample transaction data for testing."""
         self.logger.warning("Creating sample transaction data...")
