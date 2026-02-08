@@ -85,6 +85,7 @@ state_assignment:
     min_usd_value: 100  # Minimum USD value to count as significant
   recovered:
     dormancy_window_days: 3  # Days without activity after being infected
+    immunity_waning_days: 30  # Days in recovered state before becoming susceptible again
 
 # SEIR Model Parameters (Initial Guesses)
 seir_model:
@@ -144,3 +145,24 @@ logging:
   level: "INFO"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   file: "outputs/reports/crypto_cascades.log"
+
+# Computational thresholds
+thresholds:
+  # Graph size thresholds
+  large_graph_nodes: 10000          # Skip expensive metrics above this
+  very_large_graph_nodes: 50000     # Use heavy sampling above this
+  max_nodes_for_centrality: 5000    # Max nodes for closeness centrality
+
+  # Sampling parameters
+  betweenness_sample_size: 500      # k parameter for betweenness approximation
+  clustering_sample_size: 10000     # Nodes to sample for clustering
+
+  # Statistical thresholds
+  min_degrees_for_powerlaw: 50      # Minimum non-zero degrees for power-law fit
+  min_nodes_for_hypothesis: 20      # Minimum nodes for hypothesis tests
+  min_time_points: 10               # Minimum time points for model fitting
+
+  # Monte Carlo parameters
+  default_bootstrap_samples: 100
+  default_null_networks: 100
+  max_gillespie_iterations_factor: 10  # max_iter = t_max * N * this_factor

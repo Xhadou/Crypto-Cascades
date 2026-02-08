@@ -28,9 +28,36 @@ class State(Enum):
     EXPOSED = 'E'      # Connected to infected, may become infected
     INFECTED = 'I'     # Actively buying (exhibiting FOMO behavior)
     RECOVERED = 'R'    # Was infected, now dormant
-    
+
     def __str__(self) -> str:
         return self.value
+
+
+# Valid state transitions in SEIR model
+# S can go to S (stay), E (exposure), or I (direct infection after exposure)
+# E can go to E (stay) or I (become infected)
+# I can go to I (stay) or R (recover)
+# R can go to R (stay) or S (immunity wanes)
+VALID_TRANSITIONS: Dict[State, Set[State]] = {
+    State.SUSCEPTIBLE: {State.SUSCEPTIBLE, State.EXPOSED, State.INFECTED},
+    State.EXPOSED: {State.EXPOSED, State.INFECTED},
+    State.INFECTED: {State.INFECTED, State.RECOVERED},
+    State.RECOVERED: {State.RECOVERED, State.SUSCEPTIBLE},
+}
+
+
+def validate_transition(from_state: State, to_state: State) -> bool:
+    """
+    Validate that a state transition is epidemiologically valid.
+
+    Args:
+        from_state: Current state
+        to_state: Proposed new state
+
+    Returns:
+        True if transition is valid, False otherwise
+    """
+    return to_state in VALID_TRANSITIONS.get(from_state, set())
 
 
 class StateAssigner:
@@ -50,22 +77,25 @@ class StateAssigner:
         exposure_window_hours: int = 24,
         infected_threshold: float = 0.0,
         recovery_window_days: int = 3,
+        immunity_waning_days: int = 30,
         min_usd_value: float = 100.0
     ):
         """
         Initialize state assigner.
-        
+
         Args:
             susceptible_window_days: Days without buying to be susceptible
             exposure_window_hours: Hours after contact to be exposed
             infected_threshold: Minimum net BTC to be infected (positive = buying)
-            recovery_window_days: Days of dormancy before recovered
+            recovery_window_days: Days of dormancy after infection before recovered
+            immunity_waning_days: Days in recovered state before becoming susceptible again
             min_usd_value: Minimum USD transaction value to count
         """
         self.susceptible_window = timedelta(days=susceptible_window_days)
         self.exposure_window = timedelta(hours=exposure_window_hours)
         self.infected_threshold = infected_threshold
         self.recovery_window = timedelta(days=recovery_window_days)
+        self.immunity_waning_window = timedelta(days=immunity_waning_days)
         self.min_usd_value = min_usd_value
         
         # State tracking
@@ -242,40 +272,47 @@ class StateAssigner:
         current_time: datetime
     ) -> State:
         """Compute new state for a wallet based on transition rules."""
-        
+
+        new_state = prev_state  # Default: stay in current state
+
         if prev_state == State.RECOVERED:
-            # R -> S: Immunity wanes over time (simplified: immediately susceptible)
+            # R -> S: Immunity wanes after immunity_waning_window (not recovery_window!)
             recovery_time = self.recovery_times.get(wallet)
-            if recovery_time and (current_time - recovery_time) > self.recovery_window:
-                return State.SUSCEPTIBLE
-            return State.RECOVERED
-            
+            if recovery_time and (current_time - recovery_time) > self.immunity_waning_window:
+                new_state = State.SUSCEPTIBLE
+            else:
+                new_state = State.RECOVERED
+
         elif prev_state == State.INFECTED:
             # I -> R: Stop buying for recovery window
             if is_buying:
                 self.last_buying_activity[wallet] = current_time
-                return State.INFECTED
+                new_state = State.INFECTED
             else:
                 last_active = self.last_buying_activity.get(wallet)
                 if last_active:
                     days_dormant = (current_time - last_active).days
                     if days_dormant >= self.recovery_window.days:
                         self.recovery_times[wallet] = current_time
-                        return State.RECOVERED
-                return State.INFECTED
-                
+                        new_state = State.RECOVERED
+                    else:
+                        new_state = State.INFECTED
+                else:
+                    new_state = State.INFECTED
+
         elif prev_state == State.EXPOSED:
             # E -> I: Start buying
             if is_buying:
                 self.infection_times[wallet] = current_time
                 self.last_buying_activity[wallet] = current_time
-                return State.INFECTED
-            return State.EXPOSED
-            
+                new_state = State.INFECTED
+            else:
+                new_state = State.EXPOSED
+
         else:  # SUSCEPTIBLE
             # S -> E: Contact with infected neighbor
             # S -> I: Direct infection (start buying after contact)
-            
+
             has_infected_neighbor = False
             try:
                 neighbors = set(G.neighbors(wallet))
@@ -285,15 +322,26 @@ class StateAssigner:
                 has_infected_neighbor = bool(neighbors & infected_wallets)
             except:
                 pass
-                
+
             if has_infected_neighbor:
                 if is_buying:
                     self.infection_times[wallet] = current_time
                     self.last_buying_activity[wallet] = current_time
-                    return State.INFECTED
-                return State.EXPOSED
-                
-            return State.SUSCEPTIBLE
+                    new_state = State.INFECTED
+                else:
+                    new_state = State.EXPOSED
+            else:
+                new_state = State.SUSCEPTIBLE
+
+        # Validate the transition
+        if not validate_transition(prev_state, new_state):
+            self.logger.warning(
+                f"Invalid transition {prev_state.value} -> {new_state.value} "
+                f"for wallet {wallet}. Keeping current state."
+            )
+            return prev_state
+
+        return new_state
         
     def run_state_assignment(
         self,
@@ -371,16 +419,28 @@ class StateAssigner:
             })
             
         self.wallet_states = current_states
-        
+
         result_df = pd.DataFrame(state_counts)
-        
+
+        # Create a state history DataFrame that includes per-node infection times for H4 test
+        self._node_infection_times_df = pd.DataFrame([
+            {'node': node, 'infection_time': time}
+            for node, time in self.infection_times.items()
+        ])
+
         self.logger.info(
             f"State assignment complete. Final: S={result_df['S'].iloc[-1]}, "
             f"E={result_df['E'].iloc[-1]}, I={result_df['I'].iloc[-1]}, "
             f"R={result_df['R'].iloc[-1]}"
         )
-        
+
         return result_df
+
+    def get_infection_times_df(self) -> pd.DataFrame:
+        """Get DataFrame of node infection times for hypothesis testing."""
+        if hasattr(self, '_node_infection_times_df'):
+            return self._node_infection_times_df
+        return pd.DataFrame(columns=['node', 'infection_time'])
         
     def get_transition_matrix(self) -> pd.DataFrame:
         """

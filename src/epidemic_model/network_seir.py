@@ -333,41 +333,329 @@ class NetworkSEIR:
     def compute_network_r0(self, G: nx.Graph) -> float:
         """
         Compute network-adjusted R₀.
-        
+
         For networks: R₀_network = (β/γ) × <k²>/<k>
-        
+
         Where <k²>/<k> is the variance-to-mean ratio of degree.
-        
+
         Args:
             G: NetworkX graph
-            
+
         Returns:
             Network-adjusted R₀
         """
         degrees = [d for _, d in G.degree()]  # type: ignore[misc]
-        
+
         if len(degrees) == 0:
             return 0.0
-            
+
         k_mean = np.mean(degrees)
         k2_mean = np.mean([d**2 for d in degrees])
-        
+
         if k_mean == 0:
             return 0.0
-            
+
         r0_basic = self.params.beta / self.params.gamma
         network_factor = k2_mean / k_mean
-        
+
         r0_network = r0_basic * network_factor
-        
+
         self.logger.info(
             f"R₀_basic = {r0_basic:.3f}, "
             f"Network factor = {network_factor:.3f}, "
             f"R₀_network = {r0_network:.3f}"
         )
-        
+
         return float(r0_network)
+
+    def compute_time_varying_r0(
+        self,
+        state_df: pd.DataFrame,
+        window_size: int = 7,
+        method: str = 'ratio'
+    ) -> pd.DataFrame:
+        """
+        Estimate time-varying reproduction number R(t).
+
+        Args:
+            state_df: DataFrame with SEIR state counts over time
+            window_size: Rolling window size for estimation
+            method: Estimation method:
+                - 'ratio': Simple ratio method (new infections / current infections)
+
+        Returns:
+            DataFrame with columns [t, R_t, R_t_lower, R_t_upper]
+        """
+        self.logger.info(f"Computing time-varying R₀ using {method} method...")
+
+        results = []
+
+        # Extract data
+        t = np.asarray(state_df['t'].values) if 't' in state_df.columns else np.arange(len(state_df))
+
+        if 'I' in state_df.columns:
+            I = np.asarray(state_df['I'].values, dtype=float)
+            S = np.asarray(state_df['S'].values, dtype=float)
+            E = np.asarray(state_df['E'].values, dtype=float)
+        elif 'I_frac' in state_df.columns:
+            N = 10000  # Assumed population
+            I = np.asarray(state_df['I_frac'].values, dtype=float) * N
+            S = np.asarray(state_df['S_frac'].values, dtype=float) * N
+            E = np.asarray(state_df['E_frac'].values, dtype=float) * N
+        else:
+            self.logger.error("Cannot find infection data in state_df")
+            return pd.DataFrame()
+
+        # Compute new infections (incidence)
+        new_infections = np.diff(E + I)
+        new_infections = np.maximum(new_infections, 0)  # Can't be negative
+
+        if method == 'ratio':
+            # Simple ratio method
+            for i in range(window_size, len(state_df)):
+                window_start = i - window_size
+
+                # Current infected in window
+                I_window = I[window_start:i]
+                I_mean = np.mean(I_window)
+
+                # New infections in window
+                if i <= len(new_infections):
+                    new_inf_window = new_infections[window_start:min(i, len(new_infections))]
+                    new_inf_sum = np.sum(new_inf_window)
+                else:
+                    new_inf_sum = 0
+
+                # Susceptible fraction for adjustment
+                S_frac = S[i] / (S[i] + E[i] + I[i] + 1e-10)
+
+                if I_mean > 0 and S_frac > 0:
+                    # R_t ≈ (new infections per time) / (gamma * I) * (N / S)
+                    # Simplified: R_t ≈ (new_inf / I) * (1 / S_frac)
+                    R_t = (new_inf_sum / window_size) / (self.params.gamma * I_mean)
+                    # Adjust for susceptible depletion
+                    R_t_adjusted = R_t / S_frac if S_frac > 0.1 else R_t
+                else:
+                    R_t = np.nan
+                    R_t_adjusted = np.nan
+
+                # Bootstrap CI
+                if I_mean > 0 and len(I_window) > 0 and len(new_inf_window) > 0:
+                    R_t_samples = []
+                    for _ in range(100):
+                        boot_idx = np.random.choice(len(I_window), len(I_window), replace=True)
+                        boot_I = np.mean(I_window[boot_idx])
+                        boot_new = np.sum(new_inf_window[boot_idx % len(new_inf_window)]) if len(new_inf_window) > 0 else 0
+                        if boot_I > 0:
+                            R_t_samples.append((boot_new / window_size) / (self.params.gamma * boot_I))
+
+                    if R_t_samples:
+                        R_t_lower = np.percentile(R_t_samples, 2.5)
+                        R_t_upper = np.percentile(R_t_samples, 97.5)
+                    else:
+                        R_t_lower = R_t_upper = R_t
+                else:
+                    R_t_lower = R_t_upper = np.nan
+
+                results.append({
+                    't': t[i],
+                    'R_t': R_t,
+                    'R_t_adjusted': R_t_adjusted,
+                    'R_t_lower': R_t_lower,
+                    'R_t_upper': R_t_upper,
+                    'I': I[i],
+                    'S_frac': S_frac,
+                    'new_infections': new_inf_sum / window_size
+                })
+
+        df = pd.DataFrame(results)
+
+        if len(df) > 0:
+            valid_r_t = df['R_t'].dropna()
+            if len(valid_r_t) > 0:
+                self.logger.info(
+                    f"R(t) range: [{valid_r_t.min():.2f}, {valid_r_t.max():.2f}], "
+                    f"mean: {valid_r_t.mean():.2f}"
+                )
+
+        return df
     
+    def simulate_gillespie(
+        self,
+        G: nx.Graph,
+        initial_infected: List[int],
+        t_max: float,
+        fgi_values: Optional[np.ndarray] = None,
+        record_interval: float = 1.0
+    ) -> pd.DataFrame:
+        """
+        Run continuous-time stochastic simulation using Gillespie algorithm.
+
+        This is more accurate than discrete-time simulation for capturing
+        proper epidemic dynamics.
+
+        Args:
+            G: NetworkX graph
+            initial_infected: List of initially infected node IDs
+            t_max: Maximum simulation time
+            fgi_values: Optional FGI values (indexed by integer time)
+            record_interval: Time interval for recording state counts
+
+        Returns:
+            DataFrame with state counts over time
+        """
+        self.logger.info(
+            f"Running Gillespie simulation (N={G.number_of_nodes():,}, T={t_max})"
+        )
+
+        # Initialize node states
+        node_states = {node: State.SUSCEPTIBLE for node in G.nodes()}
+        for node in initial_infected:
+            if node in node_states:
+                node_states[node] = State.INFECTED
+
+        # Create efficient neighbor lookup
+        neighbors = {node: list(G.neighbors(node)) for node in G.nodes()}
+
+        # Track nodes in each state for efficient rate calculation
+        S_nodes = set(n for n, s in node_states.items() if s == State.SUSCEPTIBLE)
+        E_nodes = set(n for n, s in node_states.items() if s == State.EXPOSED)
+        I_nodes = set(n for n, s in node_states.items() if s == State.INFECTED)
+        R_nodes = set(n for n, s in node_states.items() if s == State.RECOVERED)
+
+        # Results storage
+        results = []
+        t = 0.0
+        last_record_time = 0.0
+
+        # Record initial state
+        results.append({
+            't': 0.0,
+            'S': len(S_nodes),
+            'E': len(E_nodes),
+            'I': len(I_nodes),
+            'R': len(R_nodes)
+        })
+
+        iteration = 0
+        max_iterations = int(t_max * G.number_of_nodes() * 10)  # Safety limit
+
+        while t < t_max and iteration < max_iterations:
+            iteration += 1
+
+            # Get effective beta based on current FGI
+            if fgi_values is not None and int(t) < len(fgi_values):
+                beta_eff = self.params.effective_beta(fgi_values[int(t)])
+            else:
+                beta_eff = self.params.beta
+
+            # Calculate total event rates
+            # S -> E: For each S node with infected neighbor
+            exposure_rate = 0.0
+            exposable_nodes = []
+            for s_node in S_nodes:
+                infected_neighbors = sum(1 for n in neighbors[s_node] if n in I_nodes)
+                if infected_neighbors > 0:
+                    node_rate = beta_eff * infected_neighbors
+                    exposure_rate += node_rate
+                    exposable_nodes.append((s_node, node_rate))
+
+            # E -> I: All exposed nodes
+            infection_rate = self.params.sigma * len(E_nodes)
+
+            # I -> R: All infected nodes
+            recovery_rate = self.params.gamma * len(I_nodes)
+
+            # R -> S: All recovered nodes (immunity waning)
+            waning_rate = self.params.omega * len(R_nodes)
+
+            total_rate = exposure_rate + infection_rate + recovery_rate + waning_rate
+
+            if total_rate == 0:
+                # No more events possible
+                break
+
+            # Time to next event (exponential distribution)
+            dt = np.random.exponential(1.0 / total_rate)
+            t += dt
+
+            if t > t_max:
+                break
+
+            # Choose which event occurs
+            rand = np.random.random() * total_rate
+
+            if rand < exposure_rate:
+                # Exposure event: choose which S node
+                cumsum = 0.0
+                for node, rate in exposable_nodes:
+                    cumsum += rate
+                    if cumsum >= rand:
+                        # S -> E
+                        S_nodes.remove(node)
+                        E_nodes.add(node)
+                        node_states[node] = State.EXPOSED
+                        break
+
+            elif rand < exposure_rate + infection_rate:
+                # Infection event: random E node becomes I
+                if E_nodes:
+                    node = np.random.choice(list(E_nodes))
+                    E_nodes.remove(node)
+                    I_nodes.add(node)
+                    node_states[node] = State.INFECTED
+
+            elif rand < exposure_rate + infection_rate + recovery_rate:
+                # Recovery event: random I node becomes R
+                if I_nodes:
+                    node = np.random.choice(list(I_nodes))
+                    I_nodes.remove(node)
+                    R_nodes.add(node)
+                    node_states[node] = State.RECOVERED
+
+            else:
+                # Immunity waning: random R node becomes S
+                if R_nodes:
+                    node = np.random.choice(list(R_nodes))
+                    R_nodes.remove(node)
+                    S_nodes.add(node)
+                    node_states[node] = State.SUSCEPTIBLE
+
+            # Record at intervals
+            if t - last_record_time >= record_interval:
+                results.append({
+                    't': t,
+                    'S': len(S_nodes),
+                    'E': len(E_nodes),
+                    'I': len(I_nodes),
+                    'R': len(R_nodes)
+                })
+                last_record_time = t
+
+        # Final state
+        if len(results) == 0 or results[-1]['t'] < t:
+            results.append({
+                't': min(t, t_max),
+                'S': len(S_nodes),
+                'E': len(E_nodes),
+                'I': len(I_nodes),
+                'R': len(R_nodes)
+            })
+
+        df = pd.DataFrame(results)
+
+        # Add fractions
+        N = G.number_of_nodes()
+        for col in ['S', 'E', 'I', 'R']:
+            df[f'{col}_frac'] = df[col] / N
+
+        self.logger.info(
+            f"Gillespie simulation complete: {iteration} events, "
+            f"final t={df['t'].iloc[-1]:.1f}"
+        )
+
+        return df
+
     def run_monte_carlo(
         self,
         G: nx.Graph,
