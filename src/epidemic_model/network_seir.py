@@ -98,6 +98,17 @@ class NetworkSEIR:
         np.random.seed(random_seed)
         
         self.logger = get_logger(__name__)
+
+    def __getstate__(self):
+        """Exclude logger from pickling (for ProcessPoolExecutor compatibility)."""
+        state = self.__dict__.copy()
+        state.pop('logger', None)
+        return state
+
+    def __setstate__(self, state):
+        """Restore logger after unpickling."""
+        self.__dict__.update(state)
+        self.logger = get_logger(__name__)
         
     def _seir_ode(
         self,

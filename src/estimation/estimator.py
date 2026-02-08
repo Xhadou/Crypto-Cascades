@@ -519,6 +519,171 @@ class ParameterEstimator:
         
         return pd.DataFrame(results)
 
+    def cross_validate(
+        self,
+        observed_data: pd.DataFrame,
+        N: int,
+        fgi_values: Optional[np.ndarray] = None,
+        train_fraction: float = 0.7,
+        n_splits: int = 1,
+        rolling_window: bool = False,
+        window_size: Optional[int] = None
+    ) -> pd.DataFrame:
+        """
+        Temporal cross-validation for out-of-sample prediction quality.
+
+        Fits parameters on a training portion of the time series and evaluates
+        prediction accuracy on the held-out test portion.
+
+        Args:
+            observed_data: DataFrame with columns [t, S, E, I, R] or fractions
+            N: Total population
+            fgi_values: Optional Fear & Greed Index values
+            train_fraction: Fraction of data to use for training (default 0.7)
+            n_splits: Number of rolling splits (1 = single train/test split)
+            rolling_window: If True, use rolling-window cross-validation
+            window_size: Fixed training window size (for rolling; defaults to
+                         int(train_fraction * len(data)))
+
+        Returns:
+            DataFrame with columns: split, train_mse, test_mse, train_r2,
+            test_r2, beta, sigma, gamma, train_size, test_size
+        """
+        self.logger.info(
+            f"Running temporal cross-validation "
+            f"(train_frac={train_fraction}, n_splits={n_splits}, "
+            f"rolling={rolling_window})..."
+        )
+
+        obs_fracs = self._normalize_data(observed_data, N)
+        T = len(obs_fracs)
+
+        if window_size is None:
+            window_size = int(train_fraction * T)
+
+        # Generate split indices
+        splits: List[Tuple[int, int]] = []  # (train_end, test_end)
+        if rolling_window and n_splits > 1:
+            step = max(1, (T - window_size) // n_splits)
+            for i in range(n_splits):
+                train_end = window_size + i * step
+                if train_end >= T:
+                    break
+                test_end = min(train_end + (T - window_size), T)
+                splits.append((train_end, test_end))
+        else:
+            train_end = int(train_fraction * T)
+            splits.append((train_end, T))
+
+        results = []
+        for split_idx, (train_end, test_end) in enumerate(splits):
+            train_data = obs_fracs.iloc[:train_end].reset_index(drop=True)
+            test_data = obs_fracs.iloc[train_end:test_end].reset_index(drop=True)
+
+            if len(train_data) < 10 or len(test_data) < 5:
+                self.logger.warning(
+                    f"Split {split_idx}: insufficient data "
+                    f"(train={len(train_data)}, test={len(test_data)}). Skipping."
+                )
+                continue
+
+            fgi_train = fgi_values[:train_end] if fgi_values is not None else None
+            fgi_test = fgi_values[train_end:test_end] if fgi_values is not None else None
+
+            # Fit on training data
+            try:
+                est_result = self.estimate(
+                    train_data, N=N, fgi_values=fgi_train,
+                    initial_guess={'beta': 0.3, 'sigma': 0.2, 'gamma': 0.1},
+                    n_bootstrap=0
+                )
+            except Exception as e:
+                self.logger.warning(f"Split {split_idx} training failed: {e}")
+                continue
+
+            # Evaluate on training set
+            train_mse, train_r2 = self._evaluate_prediction(
+                est_result, train_data, N, fgi_train
+            )
+
+            # Predict on test set using fitted parameters
+            test_mse, test_r2 = self._evaluate_prediction(
+                est_result, test_data, N, fgi_test
+            )
+
+            results.append({
+                'split': split_idx,
+                'train_size': len(train_data),
+                'test_size': len(test_data),
+                'beta': est_result.beta,
+                'sigma': est_result.sigma,
+                'gamma': est_result.gamma,
+                'r0': est_result.r0(),
+                'train_mse': train_mse,
+                'test_mse': test_mse,
+                'train_r2': train_r2,
+                'test_r2': test_r2,
+                'overfit_ratio': test_mse / train_mse if train_mse > 0 else float('inf'),
+            })
+
+            self.logger.info(
+                f"Split {split_idx}: train_R²={train_r2:.4f}, "
+                f"test_R²={test_r2:.4f}, "
+                f"train_MSE={train_mse:.6f}, test_MSE={test_mse:.6f}"
+            )
+
+        df = pd.DataFrame(results)
+        if len(df) > 0:
+            self.logger.info(
+                f"Cross-validation complete. "
+                f"Mean test R²={df['test_r2'].mean():.4f}, "
+                f"Mean test MSE={df['test_mse'].mean():.6f}"
+            )
+        else:
+            self.logger.warning("Cross-validation produced no valid splits.")
+
+        return df
+
+    def _evaluate_prediction(
+        self,
+        est_result: 'EstimationResult',
+        data: pd.DataFrame,
+        N: int,
+        fgi_values: Optional[np.ndarray]
+    ) -> Tuple[float, float]:
+        """
+        Evaluate prediction accuracy for a fitted model against data.
+
+        Args:
+            est_result: Fitted parameters
+            data: Observed data (normalised fractions)
+            N: Population size
+            fgi_values: Optional FGI values
+
+        Returns:
+            Tuple of (MSE, R²) for the Infected compartment
+        """
+        seir_params = est_result.to_params()
+        model = NetworkSEIR(seir_params)
+        t_max = len(data)
+        I0 = max(1, int(data['I_frac'].iloc[0] * N))
+
+        try:
+            sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
+        except Exception:
+            return float('inf'), float('-inf')
+
+        I_obs = np.asarray(data['I_frac'].values)
+        I_sim = np.asarray(sim['I_frac'].values[:len(I_obs)])
+
+        mse = float(np.mean((I_obs - I_sim) ** 2))
+
+        ss_res = np.sum((I_obs - I_sim) ** 2)
+        ss_tot = np.sum((I_obs - np.mean(I_obs)) ** 2)
+        r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else 0.0
+
+        return mse, r2
+
 
 def main():
     """Test parameter estimation."""

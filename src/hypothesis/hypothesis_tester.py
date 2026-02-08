@@ -206,17 +206,25 @@ class HypothesisTester:
         else:
             raise ValueError(f"Unknown correction method: {method}")
 
-        # Update results with adjusted values
+        # Update results: store originals in additional_metrics, update primary fields
         for i, h in enumerate(valid_hypotheses):
-            # Store original p-value
+            # Store original (unadjusted) values in additional_metrics
             results[h].additional_metrics['p_value_original'] = results[h].p_value
+            results[h].additional_metrics['reject_null_original'] = results[h].reject_null
             results[h].additional_metrics['correction_method'] = method
 
-            # Add adjusted values to additional_metrics
+            # Store adjusted values in additional_metrics for reference
             results[h].additional_metrics['p_value_adjusted'] = float(adjusted_p[i])
             results[h].additional_metrics['reject_null_adjusted'] = adjusted_p[i] < self.alpha
 
-        self.logger.info(f"Correction applied. Adjusted p-values stored in additional_metrics.")
+            # Update primary fields to use corrected values
+            results[h].p_value = float(adjusted_p[i])
+            results[h].reject_null = bool(adjusted_p[i] < self.alpha)
+
+        self.logger.info(
+            f"Correction applied. Primary p_value/reject_null updated to adjusted values. "
+            f"Originals stored in additional_metrics['p_value_original'] and ['reject_null_original']."
+        )
 
         return results
     
@@ -704,8 +712,8 @@ class HypothesisTester:
         # P-value: proportion of bootstrap samples where factor <= 1
         p_value = np.mean([f <= 1 for f in bootstrap_factors])
         
-        # Effect size: log ratio
-        effect_size = np.log(network_factor)
+        # Effect size: arithmetic difference from null (network_factor - 1)
+        effect_size = network_factor - 1
         
         # 95% CI from bootstrap
         ci_lower = np.percentile(bootstrap_factors, 2.5)
@@ -716,7 +724,7 @@ class HypothesisTester:
             description="Network structure amplifies FOMO contagion",
             test_statistic=float(network_factor),
             p_value=float(p_value),
-            effect_size=float(network_factor - 1),
+            effect_size=float(effect_size),
             confidence_interval=(float(ci_lower), float(ci_upper)),
             reject_null=bool(p_value < self.alpha),
             alpha=self.alpha,
@@ -755,8 +763,17 @@ class HypothesisTester:
         elif 'I_count' in state_history.columns:
             infection_counts = state_history.groupby('t')['I_count'].first().values
         else:
-            # Try to compute from state transitions
-            infection_counts = np.ones(len(fgi_values)) * 10  # Placeholder
+            # Cannot derive infection counts from state_history
+            self.logger.warning(
+                "H3 test requires 'I' or 'I_count' column in state_history. "
+                "Cannot compute meaningful correlation without infection data. "
+                "Returning inconclusive result."
+            )
+            return self._inconclusive_result(
+                "H3",
+                "Missing infection count data in state_history "
+                "(need 'I' or 'I_count' column)"
+            )
         
         # Align lengths
         min_len = min(len(infection_counts), len(fgi_values))
@@ -1024,20 +1041,60 @@ class HypothesisTester:
         # Node to community mapping
         node_to_community = partition
         
-        # Count within vs between community transmission
-        # For simulation, use edge infection events
+        # Count within vs between community infection transmission events
+        # Use state_history to identify S->E or S->I transitions and check
+        # whether they cross community boundaries
         within_community = 0
         between_community = 0
-        
-        # Simplified: count edges within vs between communities
-        for u, v in G.edges():
-            comm_u = node_to_community.get(u, -1)
-            comm_v = node_to_community.get(v, -1)
-            
-            if comm_u == comm_v and comm_u != -1:
-                within_community += 1
-            else:
-                between_community += 1
+        used_infection_data = False
+
+        # Try to use actual infection transmission events from state_history
+        if ('node' in state_history.columns and 'state' in state_history.columns
+                and 'datetime' in state_history.columns):
+            # Build per-node infection time from state transitions
+            infection_events = state_history[
+                state_history['state'].isin(['I', State.INFECTED.value if hasattr(State, 'INFECTED') else 'I'])
+            ]
+            if not infection_events.empty:
+                infected_nodes = set(infection_events['node'].unique()) & set(G.nodes())
+                # For each infected node, check if the infecting neighbor is in same community
+                for node in infected_nodes:
+                    comm_node = node_to_community.get(node, -1)
+                    if comm_node == -1:
+                        continue
+                    # Check neighbors that were infected before this node
+                    try:
+                        neighbors = set(G.neighbors(node))
+                        if G.is_directed():
+                            neighbors.update(G.predecessors(node))  # type: ignore[union-attr]
+                    except Exception:
+                        continue
+                    infected_neighbors = neighbors & infected_nodes
+                    for nbr in infected_neighbors:
+                        comm_nbr = node_to_community.get(nbr, -1)
+                        if comm_nbr == -1:
+                            continue
+                        if comm_node == comm_nbr:
+                            within_community += 1
+                        else:
+                            between_community += 1
+                if within_community + between_community > 0:
+                    used_infection_data = True
+
+        # Fallback: count edges within vs between communities (static graph structure)
+        if not used_infection_data:
+            self.logger.info(
+                "H5: No per-node infection data available in state_history. "
+                "Falling back to static edge-based community analysis."
+            )
+            for u, v in G.edges():
+                comm_u = node_to_community.get(u, -1)
+                comm_v = node_to_community.get(v, -1)
+
+                if comm_u == comm_v and comm_u != -1:
+                    within_community += 1
+                else:
+                    between_community += 1
         
         total_edges = within_community + between_community
         
@@ -1145,8 +1202,9 @@ class HypothesisTester:
             reject_adj = result.additional_metrics.get('reject_null_adjusted')
 
             if p_adj is not None:
+                p_orig = result.additional_metrics.get('p_value_original', result.p_value)
                 status = "REJECTED" if reject_adj else "NOT REJECTED"
-                report.append(f"{h_name}: {status} (p_adj={p_adj:.4f}, p_orig={result.p_value:.4f})")
+                report.append(f"{h_name}: {status} (p_adj={p_adj:.4f}, p_orig={p_orig:.4f})")
             else:
                 status = "REJECTED" if result.reject_null else "NOT REJECTED"
                 report.append(f"{h_name}: {status} (p={result.p_value:.4f})")
@@ -1160,7 +1218,7 @@ class HypothesisTester:
             # Additional metrics (excluding p-value related ones already shown)
             report.append("  Additional metrics:")
             for key, value in result.additional_metrics.items():
-                if key in ['p_value_original', 'p_value_adjusted', 'reject_null_adjusted', 'correction_method']:
+                if key in ['p_value_original', 'p_value_adjusted', 'reject_null_adjusted', 'reject_null_original', 'correction_method']:
                     continue
                 if isinstance(value, float):
                     report.append(f"    {key}: {value:.4f}")
@@ -1180,8 +1238,11 @@ class HypothesisTester:
         report.append("SUMMARY")
         report.append("=" * 70)
 
-        # Count rejections (use adjusted if available)
-        n_rejected_orig = sum(1 for r in hr_results.values() if r.reject_null)
+        # Count rejections (use adjusted if available, originals for comparison)
+        n_rejected_orig = sum(
+            1 for r in hr_results.values()
+            if r.additional_metrics.get('reject_null_original', r.reject_null)
+        )
         n_rejected_adj = sum(
             1 for r in hr_results.values()
             if r.additional_metrics.get('reject_null_adjusted', r.reject_null)

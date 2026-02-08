@@ -104,6 +104,9 @@ class StateAssigner:
         self.infection_times: Dict[int, datetime] = {}
         self.recovery_times: Dict[int, datetime] = {}
         self.last_buying_activity: Dict[int, datetime] = {}
+        self._node_infection_times_df: pd.DataFrame = pd.DataFrame(
+            columns=['node', 'infection_time']
+        )
         
         self.logger = get_logger(__name__)
         
@@ -114,6 +117,9 @@ class StateAssigner:
         self.infection_times = {}
         self.recovery_times = {}
         self.last_buying_activity = {}
+        self._node_infection_times_df = pd.DataFrame(
+            columns=['node', 'infection_time']
+        )
         
     def compute_wallet_flows(
         self,
