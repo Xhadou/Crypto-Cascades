@@ -23,6 +23,9 @@ from typing import Optional, Dict, List
 import numpy as np
 import pandas as pd
 import networkx as nx
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 from src.utils.logger import get_logger, setup_logger
 from src.utils.config_manager import ConfigManager
@@ -30,7 +33,9 @@ from src.utils.config_manager import ConfigManager
 # Data acquisition
 from src.data_acquisition.orbitaal_downloader import OrbitaalDownloader
 from src.data_acquisition.snap_downloader import SNAPDownloader
-from src.data_acquisition.market_data_downloader import PriceDownloader, SentimentDownloader
+from src.data_acquisition.market_data_downloader import (
+    PriceDownloader, SentimentDownloader, MarketDataMerger
+)
 
 # Preprocessing
 from src.preprocessing.orbitaal_parser import OrbitaalParser
@@ -326,24 +331,10 @@ class CryptoCascadesPipeline:
                         ]
         
         self.logger.info(f"Loaded {len(self._transactions):,} transactions")
-        
-        # Build graph
-        builder = GraphBuilder()
-        self._graph = builder.build_transaction_graph(
-            self._transactions,
-            directed=False,
-            weight_column='usd_value',
-            aggregate_multi_edges=True
-        )
-        
-        self.logger.info(
-            f"Built graph: {self._graph.number_of_nodes():,} nodes, "
-            f"{self._graph.number_of_edges():,} edges"
-        )
-        
+
         # Load market data
         market_dir = Path(self.config.get('data.raw_dir', 'data/raw/market'))
-        
+
         fgi_file = market_dir / 'fear_greed_index.csv'
         if fgi_file.exists():
             fgi_df = pd.read_csv(fgi_file)
@@ -354,12 +345,43 @@ class CryptoCascadesPipeline:
             self._fgi_values = np.random.uniform(30, 70, 365)
             self._fgi_is_synthetic = True
             self.logger.warning("Using synthetic FGI values")
-        
+
         price_file = market_dir / 'bitcoin_prices.csv'
         if price_file.exists():
             self._prices = pd.read_csv(price_file)
             self.logger.info(f"Loaded {len(self._prices)} price records")
-        
+
+        # Filter dust transactions using price data
+        if (self._prices is not None
+                and not self._prices.empty
+                and 'usd_value' in self._transactions.columns):
+            dust_threshold = self.config.get(
+                'preprocessing.dust_threshold_usd', 1.0
+            )
+            pre_filter_count = len(self._transactions)
+            self._transactions = self._transactions[
+                self._transactions['usd_value'] >= dust_threshold
+            ]
+            filtered_count = pre_filter_count - len(self._transactions)
+            self.logger.info(
+                f"Filtered {filtered_count:,} dust transactions "
+                f"(< ${dust_threshold} USD)"
+            )
+
+        # Build graph
+        builder = GraphBuilder()
+        self._graph = builder.build_transaction_graph(
+            self._transactions,
+            directed=False,
+            weight_column='usd_value',
+            aggregate_multi_edges=True
+        )
+
+        self.logger.info(
+            f"Built graph: {self._graph.number_of_nodes():,} nodes, "
+            f"{self._graph.number_of_edges():,} edges"
+        )
+
         # Save processed data
         output_file = self.output_dir / 'data' / 'processed_transactions.parquet'
         self._transactions.to_parquet(output_file)
@@ -789,8 +811,66 @@ class CryptoCascadesPipeline:
                 save_path=str(self.output_dir / 'figures' / 'dashboard.png')
             )
         
+        # Price-FGI correlation plot (requires real price + FGI data)
+        if (self._prices is not None
+                and self._fgi_values is not None
+                and not self._fgi_is_synthetic):
+            try:
+                merger = MarketDataMerger(
+                    data_dir=self.config.get('data.raw_dir', 'data/raw')
+                )
+                merged_market = merger.get_merged_data()
+                if not merged_market.empty:
+                    merged_market = merger.compute_price_returns(merged_market)
+                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+
+                    ax1.plot(
+                        merged_market['datetime'],
+                        merged_market['price'],
+                        'b-', label='BTC Price'
+                    )
+                    ax1_twin = ax1.twinx()
+                    ax1_twin.plot(
+                        merged_market['datetime'],
+                        merged_market['fear_greed_value'],
+                        'r-', alpha=0.6, label='FGI'
+                    )
+                    ax1.set_ylabel('Price (USD)')
+                    ax1_twin.set_ylabel('Fear & Greed Index')
+                    ax1.set_title('Bitcoin Price vs Fear & Greed Index')
+                    ax1.legend(loc='upper left')
+                    ax1_twin.legend(loc='upper right')
+                    ax1.grid(True, alpha=0.3)
+
+                    valid = merged_market.dropna(
+                        subset=['returns', 'fear_greed_value']
+                    )
+                    if len(valid) > 10:
+                        ax2.scatter(
+                            valid['fear_greed_value'],
+                            valid['returns'],
+                            alpha=0.5, s=20
+                        )
+                        ax2.set_xlabel('Fear & Greed Index')
+                        ax2.set_ylabel('Daily Returns')
+                        ax2.set_title('Market Sentiment vs Returns')
+                        ax2.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+                        ax2.grid(True, alpha=0.3)
+
+                    plt.tight_layout()
+                    fig.savefig(
+                        str(self.output_dir / 'figures' / 'price_fgi_correlation.png'),
+                        dpi=300
+                    )
+                    plt.close(fig)
+                    self.logger.info("Generated price-FGI correlation plot")
+            except Exception as e:
+                self.logger.warning(
+                    f"Could not generate price correlation plot: {e}"
+                )
+
         self.logger.info(f"All visualizations saved to {self.output_dir / 'figures'}")
-        
+
     def run_all(
         self,
         start_date: Optional[str] = None,
