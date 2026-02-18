@@ -781,6 +781,58 @@ class CryptoCascadesPipeline:
                 self.logger.info(
                     f"Saved SNAP validation report to {snap_output}"
                 )
+
+                # SNAP topology comparison visualization
+                topo = validation_results.get('topology', {})
+                if topo and not np.isnan(topo.get('degree_ks_statistic', float('nan'))):
+                    try:
+                        snap_df = validator.load_snap_networks(str(snap_dir))
+                        snap_graph = nx.from_pandas_edgelist(
+                            snap_df, source='source', target='target',
+                            create_using=nx.DiGraph()
+                        )
+                        snap_degrees = np.array([d for _, d in snap_graph.degree()], dtype=float)
+                        orb_degrees = np.array([d for _, d in self._graph.degree()], dtype=float)
+                        snap_viz = SEIRVisualizer(output_dir=str(self.output_dir / 'figures'))
+                        fig = snap_viz.plot_topology_comparison(
+                            snap_degrees, orb_degrees,
+                            ks_statistic=topo['degree_ks_statistic'],
+                            ks_pvalue=topo['degree_ks_pvalue'],
+                            save_path=str(self.output_dir / 'figures' / 'snap_topology_comparison.png')
+                        )
+                        plt.close(fig)
+                        self.logger.info("Generated SNAP topology comparison plot")
+                    except Exception as e:
+                        self.logger.warning(f"Could not generate SNAP topology plot: {e}")
+
+                # Trust vs infection time boxplot
+                tx = validation_results.get('trust_transmission', {})
+                if tx and not tx.get('inconclusive', True):
+                    try:
+                        trust_scores = validator.compute_trust_scores(
+                            validator.load_snap_networks(str(snap_dir))
+                        )
+                        infection_times_df = getattr(self, '_infection_times_df', pd.DataFrame())
+                        if not trust_scores.empty and not infection_times_df.empty:
+                            overlap = set(trust_scores.index) & set(infection_times_df['node'])
+                            if len(overlap) >= 20:
+                                overlap_trust = trust_scores.loc[trust_scores.index.isin(overlap)].copy()
+                                infection_map = dict(zip(
+                                    infection_times_df['node'],
+                                    infection_times_df['infection_time']
+                                ))
+                                overlap_trust['infection_time'] = overlap_trust.index.map(infection_map)
+                                overlap_trust = overlap_trust.dropna(subset=['infection_time'])
+                                snap_viz = SEIRVisualizer(output_dir=str(self.output_dir / 'figures'))
+                                fig = snap_viz.plot_trust_infection_boxplot(
+                                    overlap_trust,
+                                    save_path=str(self.output_dir / 'figures' / 'snap_trust_boxplot.png')
+                                )
+                                plt.close(fig)
+                                self.logger.info("Generated SNAP trust infection boxplot")
+                    except Exception as e:
+                        self.logger.warning(f"Could not generate SNAP trust boxplot: {e}")
+
             except Exception as e:
                 self.logger.warning(
                     f"SNAP trust network validation failed: {e}"

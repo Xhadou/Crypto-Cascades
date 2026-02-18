@@ -876,6 +876,132 @@ class SEIRVisualizer:
         return fig
 
 
+    def plot_topology_comparison(
+        self,
+        snap_degrees: np.ndarray,
+        orbitaal_degrees: np.ndarray,
+        ks_statistic: float,
+        ks_pvalue: float,
+        title: str = "SNAP vs ORBITAAL Degree Distribution",
+        save_path: Optional[str] = None
+    ) -> Figure:
+        """
+        Side-by-side histogram of SNAP and ORBITAAL degree distributions.
+
+        Args:
+            snap_degrees: Degree array from SNAP trust network.
+            orbitaal_degrees: Degree array from ORBITAAL transaction graph.
+            ks_statistic: KS test statistic from topology comparison.
+            ks_pvalue: KS test p-value.
+            title: Plot title.
+            save_path: Path to save figure.
+
+        Returns:
+            matplotlib Figure
+        """
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+        max_deg = max(
+            int(np.percentile(snap_degrees, 99)) if len(snap_degrees) else 1,
+            int(np.percentile(orbitaal_degrees, 99)) if len(orbitaal_degrees) else 1,
+        )
+        bins = np.linspace(0, max_deg, 50)
+
+        ax1.hist(snap_degrees, bins=bins, color='#E94F37', alpha=0.7,
+                 edgecolor='black', label='SNAP')
+        ax1.hist(orbitaal_degrees, bins=bins, color='#2E86AB', alpha=0.5,
+                 edgecolor='black', label='ORBITAAL')
+        ax1.set_xlabel('Degree')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title('Degree Distribution (linear)')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Log-scale version
+        snap_nonzero = snap_degrees[snap_degrees > 0]
+        orb_nonzero = orbitaal_degrees[orbitaal_degrees > 0]
+        if len(snap_nonzero) > 0:
+            ax2.hist(snap_nonzero, bins=50, color='#E94F37', alpha=0.7,
+                     edgecolor='black', label='SNAP')
+        if len(orb_nonzero) > 0:
+            ax2.hist(orb_nonzero, bins=50, color='#2E86AB', alpha=0.5,
+                     edgecolor='black', label='ORBITAAL')
+        ax2.set_xlabel('Degree')
+        ax2.set_ylabel('Frequency')
+        ax2.set_title('Degree Distribution (log scale)')
+        ax2.set_yscale('log')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        fig.suptitle(
+            f'{title}\nKS statistic={ks_statistic:.4f}, p={ks_pvalue:.4f}',
+            fontsize=14, fontweight='bold'
+        )
+        plt.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path)
+            self.logger.info(f"Saved topology comparison to {save_path}")
+
+        return fig
+
+    def plot_trust_infection_boxplot(
+        self,
+        trust_infection_data: pd.DataFrame,
+        title: str = "Infection Time by Trust Category",
+        save_path: Optional[str] = None
+    ) -> Figure:
+        """
+        Boxplot comparing infection times for trusted, distrusted, and
+        neutral users.
+
+        Args:
+            trust_infection_data: DataFrame with columns
+                [trust_category, infection_time].
+            title: Plot title.
+            save_path: Path to save figure.
+
+        Returns:
+            matplotlib Figure
+        """
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        categories = ['trusted', 'neutral', 'distrusted']
+        cat_colors = {'trusted': '#7FB069', 'neutral': '#F6AE2D', 'distrusted': '#E94F37'}
+        data_groups = []
+        labels = []
+        box_colors = []
+        for cat in categories:
+            subset = trust_infection_data.loc[
+                trust_infection_data['trust_category'] == cat, 'infection_time'
+            ].dropna()
+            if len(subset) >= 2:
+                data_groups.append(subset.values)
+                labels.append(f"{cat.capitalize()}\n(n={len(subset)})")
+                box_colors.append(cat_colors[cat])
+
+        if not data_groups:
+            ax.text(0.5, 0.5, 'Insufficient data', transform=ax.transAxes,
+                    ha='center', va='center', fontsize=14, color='gray')
+        else:
+            bp = ax.boxplot(data_groups, tick_labels=labels, patch_artist=True)
+            for patch, color in zip(bp['boxes'], box_colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+
+        ax.set_ylabel('Infection Time')
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path)
+            self.logger.info(f"Saved trust infection boxplot to {save_path}")
+
+        return fig
+
+
 def main():
     """Test visualization module."""
     import networkx as nx

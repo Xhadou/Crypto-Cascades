@@ -407,5 +407,66 @@ class TestCommunityInfectionHeatmap:
         plt.close(fig)
 
 
+class TestTopologyComparison:
+    """Tests for SNAP vs ORBITAAL topology comparison plot."""
+
+    def test_returns_figure(self, visualizer):
+        """Test that topology comparison plot returns a Figure."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        snap_deg = np.random.pareto(1.5, 500).astype(float)
+        orb_deg = np.random.pareto(1.5, 800).astype(float)
+        fig = visualizer.plot_topology_comparison(
+            snap_deg, orb_deg, ks_statistic=0.12, ks_pvalue=0.03
+        )
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_saves_to_file(self, visualizer, tmp_path):
+        """Test saving figure to file."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        snap_deg = np.random.pareto(1.5, 500).astype(float)
+        orb_deg = np.random.pareto(1.5, 800).astype(float)
+        save_path = str(tmp_path / "test_topo.png")
+        fig = visualizer.plot_topology_comparison(
+            snap_deg, orb_deg, ks_statistic=0.12, ks_pvalue=0.03,
+            save_path=save_path
+        )
+        assert Path(save_path).exists()
+        plt.close(fig)
+
+
+class TestTrustInfectionBoxplot:
+    """Tests for trust infection boxplot."""
+
+    def test_returns_figure(self, visualizer):
+        """Test that trust infection boxplot returns a Figure."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        df = pd.DataFrame({
+            'trust_category': ['trusted'] * 20 + ['distrusted'] * 20 + ['neutral'] * 10,
+            'infection_time': np.concatenate([
+                np.random.uniform(5, 15, 20),
+                np.random.uniform(10, 25, 20),
+                np.random.uniform(8, 20, 10),
+            ]),
+        })
+        fig = visualizer.plot_trust_infection_boxplot(df)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_insufficient_data(self, visualizer):
+        """Test boxplot with too few data points."""
+        import matplotlib.pyplot as plt
+        df = pd.DataFrame({
+            'trust_category': ['trusted'],
+            'infection_time': [5.0],
+        })
+        fig = visualizer.plot_trust_infection_boxplot(df)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
