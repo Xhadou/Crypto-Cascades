@@ -948,45 +948,9 @@ class CryptoCascadesPipeline:
                 merged_market = merger.get_merged_data()
                 if not merged_market.empty:
                     merged_market = merger.compute_price_returns(merged_market)
-                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-
-                    ax1.plot(
-                        merged_market['datetime'],
-                        merged_market['price'],
-                        'b-', label='BTC Price'
-                    )
-                    ax1_twin = ax1.twinx()
-                    ax1_twin.plot(
-                        merged_market['datetime'],
-                        merged_market['fear_greed_value'],
-                        'r-', alpha=0.6, label='FGI'
-                    )
-                    ax1.set_ylabel('Price (USD)')
-                    ax1_twin.set_ylabel('Fear & Greed Index')
-                    ax1.set_title('Bitcoin Price vs Fear & Greed Index')
-                    ax1.legend(loc='upper left')
-                    ax1_twin.legend(loc='upper right')
-                    ax1.grid(True, alpha=0.3)
-
-                    valid = merged_market.dropna(
-                        subset=['returns', 'fear_greed_value']
-                    )
-                    if len(valid) > 10:
-                        ax2.scatter(
-                            valid['fear_greed_value'],
-                            valid['returns'],
-                            alpha=0.5, s=20
-                        )
-                        ax2.set_xlabel('Fear & Greed Index')
-                        ax2.set_ylabel('Daily Returns')
-                        ax2.set_title('Market Sentiment vs Returns')
-                        ax2.axhline(y=0, color='k', linestyle='--', alpha=0.3)
-                        ax2.grid(True, alpha=0.3)
-
-                    plt.tight_layout()
-                    fig.savefig(
-                        str(self.output_dir / 'figures' / 'price_fgi_correlation.png'),
-                        dpi=300
+                    fig = viz.plot_price_sentiment_overview(
+                        merged_market,
+                        save_path=str(self.output_dir / 'figures' / 'price_fgi_correlation.png')
                     )
                     plt.close(fig)
                     self.logger.info("Generated price-FGI correlation plot")

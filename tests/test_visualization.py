@@ -321,6 +321,41 @@ class TestSummaryDashboard:
         plt.close(fig)
 
 
+class TestPriceSentimentOverview:
+    """Tests for price-sentiment overview plot."""
+
+    def test_returns_figure(self, visualizer):
+        """Test that plot returns a matplotlib Figure."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        dates = pd.date_range('2020-01-01', periods=100, freq='D')
+        df = pd.DataFrame({
+            'datetime': dates,
+            'price': np.cumsum(np.random.randn(100)) + 10000,
+            'fear_greed_value': np.random.uniform(20, 80, 100),
+            'returns': np.random.randn(100) * 0.02,
+        })
+        fig = visualizer.plot_price_sentiment_overview(df)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_saves_to_file(self, visualizer, tmp_path):
+        """Test saving figure to file."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        dates = pd.date_range('2020-01-01', periods=100, freq='D')
+        df = pd.DataFrame({
+            'datetime': dates,
+            'price': np.cumsum(np.random.randn(100)) + 10000,
+            'fear_greed_value': np.random.uniform(20, 80, 100),
+            'returns': np.random.randn(100) * 0.02,
+        })
+        save_path = str(tmp_path / "test_price_sentiment.png")
+        fig = visualizer.plot_price_sentiment_overview(df, save_path=save_path)
+        assert Path(save_path).exists()
+        plt.close(fig)
+
+
 class TestR0ComparisonPlot:
     """Tests for R₀ comparison bar chart."""
 
