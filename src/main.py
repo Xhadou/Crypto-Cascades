@@ -872,7 +872,17 @@ class CryptoCascadesPipeline:
             return
         
         viz = SEIRVisualizer(output_dir=str(self.output_dir / 'figures'))
-        
+
+        # Apply publication style if configured
+        pub_style = self.config.get('visualization.publication_style', None)
+        if pub_style:
+            try:
+                from src.visualization.publication_style import set_publication_style
+                set_publication_style(pub_style)
+                self.logger.info(f"Applied '{pub_style}' publication style")
+            except Exception as e:
+                self.logger.warning(f"Could not apply publication style '{pub_style}': {e}")
+
         # SEIR trajectory
         self.logger.info("Generating SEIR trajectory plot...")
         fgi_array: Optional[np.ndarray] = None
