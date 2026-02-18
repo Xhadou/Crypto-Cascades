@@ -585,7 +585,23 @@ class CryptoCascadesPipeline:
         output_file = self.output_dir / 'data' / 'seir_results.csv'
         self._seir_results.to_csv(output_file, index=False)
         self.logger.info(f"Saved SEIR results to {output_file}")
-        
+
+        # Compute early warning signals
+        try:
+            from src.network_analysis.early_warning import EpidemicEarlyWarning
+            ews = EpidemicEarlyWarning()
+            self._ews_indicators = ews.compute_ews_indicators(self._seir_results)
+            if not self._ews_indicators.empty:
+                transition = ews.detect_transition_point(self._ews_indicators)
+                if transition is not None:
+                    self.logger.info(f"EWS transition point detected at t={transition}")
+                else:
+                    self.logger.info("No sustained EWS alarm detected")
+            else:
+                self.logger.info("EWS indicators empty (time series too short)")
+        except Exception as e:
+            self.logger.warning(f"Early warning signal computation failed: {e}")
+
     def run_estimate(self) -> None:
         """Phase 6: Parameter estimation."""
         self.logger.info("=" * 60)
@@ -1010,6 +1026,21 @@ class CryptoCascadesPipeline:
                 self.logger.warning(
                     f"Could not generate price correlation plot: {e}"
                 )
+
+        # Early warning signals plot
+        if self._ews_indicators is not None and not self._ews_indicators.empty:
+            try:
+                from src.network_analysis.early_warning import EpidemicEarlyWarning
+                ews = EpidemicEarlyWarning()
+                transition = ews.detect_transition_point(self._ews_indicators)
+                viz.plot_early_warning_signals(
+                    self._ews_indicators,
+                    transition_point=transition,
+                    save_path=str(self.output_dir / 'figures' / 'early_warning_signals.png')
+                )
+                self.logger.info("Generated early warning signals plot")
+            except Exception as e:
+                self.logger.warning(f"Could not generate early warning signals plot: {e}")
 
         self.logger.info(f"All visualizations saved to {self.output_dir / 'figures'}")
 

@@ -876,6 +876,73 @@ class SEIRVisualizer:
         return fig
 
 
+    def plot_early_warning_signals(
+        self,
+        ews_df: pd.DataFrame,
+        transition_point: Optional[int] = None,
+        title: str = "Epidemic Early Warning Signals",
+        save_path: Optional[str] = None
+    ) -> Figure:
+        """
+        Plot early warning signal indicators over time.
+
+        Args:
+            ews_df: DataFrame with columns [t, variance, autocorrelation,
+                skewness, alarm].
+            transition_point: Detected transition time-step, if any.
+            title: Plot title.
+            save_path: Path to save figure.
+
+        Returns:
+            matplotlib Figure
+        """
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+
+        t = np.asarray(ews_df['t'].values)
+
+        # Variance
+        axes[0].plot(t, ews_df['variance'], color='#E94F37', linewidth=1.5)
+        axes[0].set_ylabel('Variance')
+        axes[0].set_title('Rolling Variance')
+        axes[0].grid(True, alpha=0.3)
+
+        # Autocorrelation
+        axes[1].plot(t, ews_df['autocorrelation'], color='#2E86AB', linewidth=1.5)
+        axes[1].set_ylabel('Lag-1 Autocorrelation')
+        axes[1].set_title('Lag-1 Autocorrelation')
+        axes[1].grid(True, alpha=0.3)
+
+        # Skewness
+        axes[2].plot(t, ews_df['skewness'], color='#7FB069', linewidth=1.5)
+        axes[2].set_ylabel('Skewness')
+        axes[2].set_xlabel('Time')
+        axes[2].set_title('Rolling Skewness')
+        axes[2].grid(True, alpha=0.3)
+
+        # Mark alarm time-steps
+        if 'alarm' in ews_df.columns:
+            alarm_mask = ews_df['alarm'].astype(bool)
+            alarm_t = t[alarm_mask]
+            for ax in axes:
+                for at in alarm_t:
+                    ax.axvline(x=at, color='red', alpha=0.15, linewidth=1)
+
+        # Mark transition point
+        if transition_point is not None:
+            for ax in axes:
+                ax.axvline(x=transition_point, color='black', linestyle='--',
+                           linewidth=2, label=f'Transition (t={transition_point})')
+            axes[0].legend(loc='upper right')
+
+        fig.suptitle(title, fontsize=14, fontweight='bold')
+        plt.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path)
+            self.logger.info(f"Saved early warning signals to {save_path}")
+
+        return fig
+
     def plot_topology_comparison(
         self,
         snap_degrees: np.ndarray,

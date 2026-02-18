@@ -407,6 +407,39 @@ class TestCommunityInfectionHeatmap:
         plt.close(fig)
 
 
+class TestEarlyWarningSignalsPlot:
+    """Tests for early warning signals plot."""
+
+    def test_returns_figure(self, visualizer):
+        """Test that EWS plot returns a Figure."""
+        import matplotlib.pyplot as plt
+        ews_df = pd.DataFrame({
+            't': range(10, 100),
+            'variance': np.random.uniform(0, 0.01, 90),
+            'autocorrelation': np.random.uniform(0, 1, 90),
+            'skewness': np.random.uniform(-1, 1, 90),
+            'alarm': [False] * 70 + [True] * 20,
+        })
+        fig = visualizer.plot_early_warning_signals(ews_df, transition_point=80)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_saves_to_file(self, visualizer, tmp_path):
+        """Test saving figure to file."""
+        import matplotlib.pyplot as plt
+        ews_df = pd.DataFrame({
+            't': range(10, 50),
+            'variance': np.random.uniform(0, 0.01, 40),
+            'autocorrelation': np.random.uniform(0, 1, 40),
+            'skewness': np.random.uniform(-1, 1, 40),
+            'alarm': [False] * 40,
+        })
+        save_path = str(tmp_path / "test_ews.png")
+        fig = visualizer.plot_early_warning_signals(ews_df, save_path=save_path)
+        assert Path(save_path).exists()
+        plt.close(fig)
+
+
 class TestTopologyComparison:
     """Tests for SNAP vs ORBITAAL topology comparison plot."""
 
