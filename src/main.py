@@ -853,6 +853,90 @@ class CryptoCascadesPipeline:
                 save_path=str(self.output_dir / 'figures' / 'dashboard.png')
             )
         
+        # Network states visualization
+        if self._graph is not None and self._node_states is not None:
+            try:
+                G_plot = self._graph
+                states_plot = self._node_states
+                # Sample subgraph for large networks to avoid hanging
+                if G_plot.number_of_nodes() > 5000:
+                    sample_nodes = list(G_plot.nodes())[:5000]
+                    G_plot = G_plot.subgraph(sample_nodes).copy()
+                    states_plot = {n: self._node_states.get(n, State.SUSCEPTIBLE) for n in G_plot.nodes()}
+                    self.logger.info(f"Sampled subgraph to {G_plot.number_of_nodes()} nodes for visualization")
+                viz.plot_network_states(
+                    G_plot,
+                    states_plot,
+                    title="Network FOMO State",
+                    save_path=str(self.output_dir / 'figures' / 'network_states.png')
+                )
+                self.logger.info("Generated network states plot")
+            except Exception as e:
+                self.logger.warning(f"Could not generate network states plot: {e}")
+
+        # FGI correlation plot (requires real FGI + H3 results)
+        if (not self._fgi_is_synthetic
+                and self._hypothesis_results is not None
+                and 'H3' in self._hypothesis_results):
+            h3 = self._hypothesis_results['H3']
+            is_inconclusive = (
+                h3.additional_metrics.get('inconclusive', False)
+                or np.isnan(h3.p_value)
+            )
+            if not is_inconclusive and self._seir_results is not None:
+                try:
+                    I_vals = np.asarray(self._seir_results['I_frac'].values)
+                    infection_rate = np.diff(I_vals)
+                    min_len = min(len(self._fgi_values), len(infection_rate))
+                    fgi_aligned = np.asarray(self._fgi_values[:min_len])
+                    rate_aligned = infection_rate[:min_len]
+                    corr = h3.additional_metrics.get('correlation', h3.test_statistic)
+                    p_val = h3.p_value
+                    viz.plot_fgi_correlation(
+                        fgi_aligned,
+                        rate_aligned,
+                        correlation=corr,
+                        p_value=p_val,
+                        save_path=str(self.output_dir / 'figures' / 'fgi_correlation.png')
+                    )
+                    self.logger.info("Generated FGI correlation plot")
+                except Exception as e:
+                    self.logger.warning(f"Could not generate FGI correlation plot: {e}")
+
+        # Parameter sensitivity tornado chart
+        if self._sensitivity_df is not None:
+            try:
+                viz.plot_parameter_sensitivity(
+                    self._sensitivity_df,
+                    save_path=str(self.output_dir / 'figures' / 'parameter_sensitivity.png')
+                )
+                self.logger.info("Generated parameter sensitivity plot")
+            except Exception as e:
+                self.logger.warning(f"Could not generate parameter sensitivity plot: {e}")
+
+        # Community infection heatmap
+        if self._community_partition is not None:
+            try:
+                infection_times_df = getattr(self, '_infection_times_df', pd.DataFrame())
+                if not infection_times_df.empty:
+                    infection_times_dict = dict(
+                        zip(infection_times_df['node'], infection_times_df['infection_time'])
+                    )
+                    # Invert partition (node->comm) to (comm->nodes)
+                    comm_to_nodes: Dict[int, list] = {}
+                    for node, comm_id in self._community_partition.items():
+                        comm_to_nodes.setdefault(comm_id, []).append(node)
+                    viz.plot_community_infection_heatmap(
+                        comm_to_nodes,
+                        infection_times_dict,
+                        save_path=str(self.output_dir / 'figures' / 'community_infection_heatmap.png')
+                    )
+                    self.logger.info("Generated community infection heatmap")
+                else:
+                    self.logger.warning("Skipping community infection heatmap — no infection times available")
+            except Exception as e:
+                self.logger.warning(f"Could not generate community infection heatmap: {e}")
+
         # Price-FGI correlation plot (requires real price + FGI data)
         if (self._prices is not None
                 and self._fgi_values is not None
