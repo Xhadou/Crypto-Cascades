@@ -747,7 +747,44 @@ class CryptoCascadesPipeline:
         with open(output_file, 'w') as f:
             f.write(report)
         self.logger.info(f"Saved hypothesis report to {output_file}")
-        
+
+        # SNAP Trust Network Validation
+        snap_dir = Path(self.config.get('data.raw_dir', 'data/raw')) / 'snap'
+        if snap_dir.exists() and any(snap_dir.glob('*.csv')):
+            try:
+                from src.validation.trust_network_validator import (
+                    TrustNetworkValidator,
+                )
+                validator = TrustNetworkValidator()
+                validation_results = validator.run_all_validations(
+                    snap_dir=str(snap_dir),
+                    orbitaal_graph=self._graph,
+                    node_states=self._node_states,
+                    infection_times_df=getattr(
+                        self, '_infection_times_df', pd.DataFrame()
+                    ),
+                )
+                snap_report = validator.generate_validation_report(
+                    validation_results
+                )
+                self.logger.info("\n" + snap_report)
+                snap_output = (
+                    self.output_dir / 'reports' / 'snap_validation_report.txt'
+                )
+                with open(snap_output, 'w') as f:
+                    f.write(snap_report)
+                self.logger.info(
+                    f"Saved SNAP validation report to {snap_output}"
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"SNAP trust network validation failed: {e}"
+                )
+        else:
+            self.logger.info(
+                "SNAP trust network data not found, skipping validation"
+            )
+
     def run_visualize(self) -> None:
         """Phase 8: Generate visualizations."""
         self.logger.info("=" * 60)
