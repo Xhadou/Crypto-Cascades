@@ -204,6 +204,9 @@ class CryptoCascadesPipeline:
         self._seir_results = None
         self._estimated_params = None
         self._hypothesis_results = None
+        self._sensitivity_df = None
+        self._community_partition = None
+        self._ews_indicators = None
         
     def run_download(self) -> None:
         """Phase 1: Download all required data."""
@@ -452,7 +455,8 @@ class CryptoCascadesPipeline:
         communities = community_result['partition']
         modularity = community_result['modularity']
         n_communities = community_result['n_communities']
-        
+        self._community_partition = communities
+
         self.logger.info(f"  Communities: {n_communities}")
         self.logger.info(f"  Modularity: {modularity:.4f}")
         
@@ -636,7 +640,8 @@ class CryptoCascadesPipeline:
             N=N,
             fgi_values=fgi_array
         )
-        
+        self._sensitivity_df = sensitivity
+
         self.logger.info("Parameter sensitivities:")
         for _, row in sensitivity.iterrows():
             self.logger.info(f"  {row['parameter']}: elasticity = {row['elasticity']:.4f}")
