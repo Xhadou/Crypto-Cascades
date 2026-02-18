@@ -10,6 +10,8 @@ Creates publication-quality figures for FOMO contagion research:
 6. Parameter confidence intervals
 """
 
+import math
+
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -425,25 +427,50 @@ class SEIRVisualizer:
         ax1 = axes[0]
         hypotheses = sorted(results.keys())
         p_values = [results[h].p_value for h in hypotheses]
-        colors = ['#7FB069' if p < 0.05 else '#E94F37' for p in p_values]
-        
-        bars = ax1.bar(hypotheses, p_values, color=colors, alpha=0.8)
+
+        # Handle NaN (inconclusive) p-values
+        display_values = []
+        colors = []
+        inconclusive_indices = []
+        for i, p in enumerate(p_values):
+            if math.isnan(p):
+                display_values.append(0.5)  # Fixed height for inconclusive
+                colors.append('#999999')  # Gray
+                inconclusive_indices.append(i)
+            elif p < 0.05:
+                display_values.append(p)
+                colors.append('#7FB069')
+            else:
+                display_values.append(p)
+                colors.append('#E94F37')
+
+        bars = ax1.bar(hypotheses, display_values, color=colors, alpha=0.8)
+        # Add hatch pattern to inconclusive bars
+        for idx in inconclusive_indices:
+            bars[idx].set_hatch('//')
         ax1.axhline(y=0.05, color='black', linestyle='--', label='α = 0.05')
         ax1.set_ylabel('P-value')
         ax1.set_title('P-values by Hypothesis')
-        ax1.legend()
-        
-        # Add significance stars
+
+        # Build legend with Inconclusive entry if needed
+        legend_handles = [ax1.get_lines()[0]]
+        if inconclusive_indices:
+            inconclusive_patch = mpatches.Patch(
+                facecolor='#999999', hatch='//', alpha=0.8, label='Inconclusive'
+            )
+            legend_handles.append(inconclusive_patch)
+        ax1.legend(handles=legend_handles)
+
+        # Add significance stars or N/A label
         for i, (h, p) in enumerate(zip(hypotheses, p_values)):
-            if p < 0.001:
-                star = '***'
+            if math.isnan(p):
+                ax1.text(i, display_values[i] + 0.02, 'N/A', ha='center', fontsize=11, color='#666666')
+            elif p < 0.001:
+                ax1.text(i, p + 0.02, '***', ha='center', fontsize=14)
             elif p < 0.01:
-                star = '**'
+                ax1.text(i, p + 0.02, '**', ha='center', fontsize=14)
             elif p < 0.05:
-                star = '*'
-            else:
-                star = ''
-            ax1.text(i, p + 0.02, star, ha='center', fontsize=14)
+                ax1.text(i, p + 0.02, '*', ha='center', fontsize=14)
         
         # Right: Effect sizes
         ax2 = axes[1]
@@ -593,8 +620,25 @@ class SEIRVisualizer:
         ax3 = fig.add_subplot(gs[1, 0])
         hypotheses = sorted(hypothesis_results.keys())
         p_values = [hypothesis_results[h].p_value for h in hypotheses]
-        colors = ['#7FB069' if p < 0.05 else '#E94F37' for p in p_values]
-        ax3.bar(hypotheses, p_values, color=colors, alpha=0.8)
+        dash_display = []
+        dash_colors = []
+        dash_inconclusive = []
+        for idx, p in enumerate(p_values):
+            if math.isnan(p):
+                dash_display.append(0.5)
+                dash_colors.append('#999999')
+                dash_inconclusive.append(idx)
+            elif p < 0.05:
+                dash_display.append(p)
+                dash_colors.append('#7FB069')
+            else:
+                dash_display.append(p)
+                dash_colors.append('#E94F37')
+        dash_bars = ax3.bar(hypotheses, dash_display, color=dash_colors, alpha=0.8)
+        for idx in dash_inconclusive:
+            dash_bars[idx].set_hatch('//')
+        for idx in dash_inconclusive:
+            ax3.text(idx, dash_display[idx] + 0.02, 'N/A', ha='center', fontsize=9, color='#666666')
         ax3.axhline(y=0.05, color='black', linestyle='--')
         ax3.set_ylabel('P-value')
         ax3.set_title('Hypothesis Test P-values')
@@ -662,8 +706,11 @@ class SEIRVisualizer:
         
         for h in sorted(hypothesis_results.keys()):
             r = hypothesis_results[h]
-            status = "✓" if r.reject_null else "✗"
-            summary_text.append(f"  {h}: {status} (p={r.p_value:.3f})")
+            if math.isnan(r.p_value):
+                summary_text.append(f"  {h}: N/A (inconclusive)")
+            else:
+                status = "✓" if r.reject_null else "✗"
+                summary_text.append(f"  {h}: {status} (p={r.p_value:.3f})")
         
         ax7.text(0.1, 0.95, '\n'.join(summary_text), transform=ax7.transAxes,
                 fontsize=10, verticalalignment='top', fontfamily='monospace')

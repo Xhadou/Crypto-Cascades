@@ -238,6 +238,67 @@ class TestHypothesisResultsPlot:
         plt.close(fig)
 
 
+class TestHypothesisResultsInconclusiveNaN:
+    """Tests for inconclusive (NaN p-value) handling."""
+
+    def test_nan_pvalue_renders_gray_bar(self, visualizer):
+        """Test that NaN p-values render as gray bars with N/A annotation."""
+        import matplotlib.pyplot as plt
+        results = {}
+        for h in ['H1', 'H2', 'H4', 'H5']:
+            results[h] = HypothesisResult(
+                hypothesis=h, description=f"Test {h}",
+                test_statistic=2.0, p_value=0.01, effect_size=0.5,
+                confidence_interval=(0.1, 0.9), reject_null=True,
+                alpha=0.05, sample_size=100, additional_metrics={}
+            )
+        # H3 is inconclusive with NaN p-value
+        results['H3'] = HypothesisResult(
+            hypothesis='H3', description='Inconclusive',
+            test_statistic=float('nan'), p_value=float('nan'),
+            effect_size=float('nan'),
+            confidence_interval=(float('nan'), float('nan')),
+            reject_null=False, alpha=0.05, sample_size=0,
+            additional_metrics={'inconclusive': True}
+        )
+        fig = visualizer.plot_hypothesis_results(results)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_dashboard_nan_pvalue(
+        self, visualizer, sample_seir_results, sample_graph,
+        sample_node_states, sample_estimated_params, sample_fgi
+    ):
+        """Test dashboard handles NaN p-values in hypothesis results."""
+        import matplotlib.pyplot as plt
+        results = {}
+        for h in ['H1', 'H2', 'H4', 'H5']:
+            results[h] = HypothesisResult(
+                hypothesis=h, description=f"Test {h}",
+                test_statistic=2.0, p_value=0.01, effect_size=0.5,
+                confidence_interval=(0.1, 0.9), reject_null=True,
+                alpha=0.05, sample_size=100, additional_metrics={}
+            )
+        results['H3'] = HypothesisResult(
+            hypothesis='H3', description='Inconclusive',
+            test_statistic=float('nan'), p_value=float('nan'),
+            effect_size=float('nan'),
+            confidence_interval=(float('nan'), float('nan')),
+            reject_null=False, alpha=0.05, sample_size=0,
+            additional_metrics={'inconclusive': True}
+        )
+        fig = visualizer.create_summary_dashboard(
+            seir_results=sample_seir_results,
+            G=sample_graph,
+            node_states=sample_node_states,
+            hypothesis_results=results,
+            estimated_params=sample_estimated_params,
+            fgi_values=sample_fgi,
+        )
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+
 class TestSummaryDashboard:
     """Tests for the summary dashboard."""
 
