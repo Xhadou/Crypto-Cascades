@@ -1154,7 +1154,8 @@ class CryptoCascadesPipeline:
                 'description': period_config.get('description', period_name.capitalize()),
                 'estimated_params': self._estimated_params,
                 'seir_results': self._seir_results.copy(),
-                'hypothesis_results': self._hypothesis_results
+                'hypothesis_results': self._hypothesis_results,
+                'fgi_data_source': 'synthetic' if self._fgi_is_synthetic else 'real',
             }
             
             # Categorize by market type
@@ -1211,7 +1212,8 @@ class CryptoCascadesPipeline:
                 'r0': res['r0'],
                 'r0_ci_lower': res['r0_ci'][0],
                 'r0_ci_upper': res['r0_ci'][1],
-                'description': res['description']
+                'description': res['description'],
+                'fgi_data_source': res.get('fgi_data_source', 'unknown'),
             }
             for name, res in period_results.items() if name != 'h6_test'
         ])
