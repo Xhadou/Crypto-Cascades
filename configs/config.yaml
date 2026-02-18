@@ -146,6 +146,10 @@ logging:
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
   file: "outputs/reports/crypto_cascades.log"
 
+# Preprocessing
+preprocessing:
+  dust_threshold_usd: 1.0  # Filter transactions below this USD value
+
 # Computational thresholds
 thresholds:
   # Graph size thresholds

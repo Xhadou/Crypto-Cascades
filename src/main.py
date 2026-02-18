@@ -23,6 +23,9 @@ from typing import Optional, Dict, List
 import numpy as np
 import pandas as pd
 import networkx as nx
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 from src.utils.logger import get_logger, setup_logger
 from src.utils.config_manager import ConfigManager
@@ -30,7 +33,9 @@ from src.utils.config_manager import ConfigManager
 # Data acquisition
 from src.data_acquisition.orbitaal_downloader import OrbitaalDownloader
 from src.data_acquisition.snap_downloader import SNAPDownloader
-from src.data_acquisition.market_data_downloader import PriceDownloader, SentimentDownloader
+from src.data_acquisition.market_data_downloader import (
+    PriceDownloader, SentimentDownloader, MarketDataMerger
+)
 
 # Preprocessing
 from src.preprocessing.orbitaal_parser import OrbitaalParser
@@ -193,6 +198,7 @@ class CryptoCascadesPipeline:
         self._graph = None
         self._transactions = None
         self._fgi_values = None
+        self._fgi_is_synthetic = False
         self._prices = None
         self._node_states = None
         self._seir_results = None
@@ -325,7 +331,43 @@ class CryptoCascadesPipeline:
                         ]
         
         self.logger.info(f"Loaded {len(self._transactions):,} transactions")
-        
+
+        # Load market data
+        market_dir = Path(self.config.get('data.raw_dir', 'data/raw/market'))
+
+        fgi_file = market_dir / 'fear_greed_index.csv'
+        if fgi_file.exists():
+            fgi_df = pd.read_csv(fgi_file)
+            self._fgi_values = fgi_df['value'].values
+            self._fgi_is_synthetic = False
+            self.logger.info(f"Loaded {len(self._fgi_values)} FGI values")
+        else:
+            self._fgi_values = np.random.uniform(30, 70, 365)
+            self._fgi_is_synthetic = True
+            self.logger.warning("Using synthetic FGI values")
+
+        price_file = market_dir / 'bitcoin_prices.csv'
+        if price_file.exists():
+            self._prices = pd.read_csv(price_file)
+            self.logger.info(f"Loaded {len(self._prices)} price records")
+
+        # Filter dust transactions using price data
+        if (self._prices is not None
+                and not self._prices.empty
+                and 'usd_value' in self._transactions.columns):
+            dust_threshold = self.config.get(
+                'preprocessing.dust_threshold_usd', 1.0
+            )
+            pre_filter_count = len(self._transactions)
+            self._transactions = self._transactions[
+                self._transactions['usd_value'] >= dust_threshold
+            ]
+            filtered_count = pre_filter_count - len(self._transactions)
+            self.logger.info(
+                f"Filtered {filtered_count:,} dust transactions "
+                f"(< ${dust_threshold} USD)"
+            )
+
         # Build graph
         builder = GraphBuilder()
         self._graph = builder.build_transaction_graph(
@@ -334,29 +376,12 @@ class CryptoCascadesPipeline:
             weight_column='usd_value',
             aggregate_multi_edges=True
         )
-        
+
         self.logger.info(
             f"Built graph: {self._graph.number_of_nodes():,} nodes, "
             f"{self._graph.number_of_edges():,} edges"
         )
-        
-        # Load market data
-        market_dir = Path(self.config.get('data.raw_dir', 'data/raw/market'))
-        
-        fgi_file = market_dir / 'fear_greed_index.csv'
-        if fgi_file.exists():
-            fgi_df = pd.read_csv(fgi_file)
-            self._fgi_values = fgi_df['value'].values
-            self.logger.info(f"Loaded {len(self._fgi_values)} FGI values")
-        else:
-            self._fgi_values = np.random.uniform(30, 70, 365)
-            self.logger.warning("Using synthetic FGI values")
-        
-        price_file = market_dir / 'bitcoin_prices.csv'
-        if price_file.exists():
-            self._prices = pd.read_csv(price_file)
-            self.logger.info(f"Loaded {len(self._prices)} price records")
-        
+
         # Save processed data
         output_file = self.output_dir / 'data' / 'processed_transactions.parquet'
         self._transactions.to_parquet(output_file)
@@ -513,6 +538,10 @@ class CryptoCascadesPipeline:
         t_max = self.config.get('simulation.t_max', 100)
         
         self.logger.info(f"Running mean-field simulation (N={N:,}, T={t_max})...")
+        if self._fgi_is_synthetic:
+            self.logger.warning(
+                "Simulation β-amplification is based on synthetic sentiment data"
+            )
         fgi_array: Optional[np.ndarray] = None
         if self._fgi_values is not None:
             fgi_array = np.asarray(self._fgi_values[:t_max])
@@ -572,6 +601,11 @@ class CryptoCascadesPipeline:
         N = self._graph.number_of_nodes()
         
         self.logger.info("Estimating SEIR parameters...")
+        if self._fgi_is_synthetic:
+            self.logger.warning(
+                "Parameter estimation using synthetic FGI data — "
+                "FOMO amplification estimates may not reflect real sentiment"
+            )
         fgi_array: Optional[np.ndarray] = None
         if self._fgi_values is not None:
             fgi_array = np.asarray(self._fgi_values)
@@ -640,9 +674,14 @@ class CryptoCascadesPipeline:
         if not infection_times_df.empty:
             self.logger.info(f"Including {len(infection_times_df)} node infection times for H4 test")
         
-        # Prepare FGI array
+        # Determine if real FGI data is available
+        fgi_is_unusable = (
+            self._fgi_values is None or self._fgi_is_synthetic
+        )
+
+        # Prepare FGI array — still needed for non-H3 tests
         fgi_array = np.asarray(self._fgi_values) if self._fgi_values is not None else np.array([50.0])
-        
+
         if hypothesis == 'all':
             self.logger.info("Testing all hypotheses...")
             self._hypothesis_results = tester.test_all(
@@ -653,10 +692,20 @@ class CryptoCascadesPipeline:
                 observed_data=self._seir_results,
                 infection_times_df=infection_times_df
             )
+            # Override H3 if FGI data is not real
+            if fgi_is_unusable:
+                self.logger.error(
+                    "Skipping H3: No real FGI data available. H3 requires actual "
+                    "Fear & Greed Index data to test sentiment-transmission correlation."
+                )
+                self._hypothesis_results['H3'] = tester._inconclusive_result(
+                    "H3",
+                    "No real FGI data available (using synthetic/fallback values)"
+                )
         else:
             self._hypothesis_results = {}
             self.logger.info(f"Testing hypothesis {hypothesis}...")
-            
+
             if hypothesis == 'H1':
                 self._hypothesis_results['H1'] = tester.test_h1_epidemic_dynamics(
                     state_history, self._estimated_params, self._seir_results
@@ -666,9 +715,19 @@ class CryptoCascadesPipeline:
                     self._graph, self._estimated_params
                 )
             elif hypothesis == 'H3':
-                self._hypothesis_results['H3'] = tester.test_h3_fgi_correlation(
-                    state_history, fgi_array
-                )
+                if fgi_is_unusable:
+                    self.logger.error(
+                        "Skipping H3: No real FGI data available. H3 requires actual "
+                        "Fear & Greed Index data to test sentiment-transmission correlation."
+                    )
+                    self._hypothesis_results['H3'] = tester._inconclusive_result(
+                        "H3",
+                        "No real FGI data available (using synthetic/fallback values)"
+                    )
+                else:
+                    self._hypothesis_results['H3'] = tester.test_h3_fgi_correlation(
+                        state_history, fgi_array
+                    )
             elif hypothesis == 'H4':
                 infection_times_df = getattr(self, '_infection_times_df', pd.DataFrame())
                 self._hypothesis_results['H4'] = tester.test_h4_centrality_effect(
@@ -688,7 +747,44 @@ class CryptoCascadesPipeline:
         with open(output_file, 'w') as f:
             f.write(report)
         self.logger.info(f"Saved hypothesis report to {output_file}")
-        
+
+        # SNAP Trust Network Validation
+        snap_dir = Path(self.config.get('data.raw_dir', 'data/raw')) / 'snap'
+        if snap_dir.exists() and any(snap_dir.glob('*.csv')):
+            try:
+                from src.validation.trust_network_validator import (
+                    TrustNetworkValidator,
+                )
+                validator = TrustNetworkValidator()
+                validation_results = validator.run_all_validations(
+                    snap_dir=str(snap_dir),
+                    orbitaal_graph=self._graph,
+                    node_states=self._node_states,
+                    infection_times_df=getattr(
+                        self, '_infection_times_df', pd.DataFrame()
+                    ),
+                )
+                snap_report = validator.generate_validation_report(
+                    validation_results
+                )
+                self.logger.info("\n" + snap_report)
+                snap_output = (
+                    self.output_dir / 'reports' / 'snap_validation_report.txt'
+                )
+                with open(snap_output, 'w') as f:
+                    f.write(snap_report)
+                self.logger.info(
+                    f"Saved SNAP validation report to {snap_output}"
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"SNAP trust network validation failed: {e}"
+                )
+        else:
+            self.logger.info(
+                "SNAP trust network data not found, skipping validation"
+            )
+
     def run_visualize(self) -> None:
         """Phase 8: Generate visualizations."""
         self.logger.info("=" * 60)
@@ -752,8 +848,66 @@ class CryptoCascadesPipeline:
                 save_path=str(self.output_dir / 'figures' / 'dashboard.png')
             )
         
+        # Price-FGI correlation plot (requires real price + FGI data)
+        if (self._prices is not None
+                and self._fgi_values is not None
+                and not self._fgi_is_synthetic):
+            try:
+                merger = MarketDataMerger(
+                    data_dir=self.config.get('data.raw_dir', 'data/raw')
+                )
+                merged_market = merger.get_merged_data()
+                if not merged_market.empty:
+                    merged_market = merger.compute_price_returns(merged_market)
+                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+
+                    ax1.plot(
+                        merged_market['datetime'],
+                        merged_market['price'],
+                        'b-', label='BTC Price'
+                    )
+                    ax1_twin = ax1.twinx()
+                    ax1_twin.plot(
+                        merged_market['datetime'],
+                        merged_market['fear_greed_value'],
+                        'r-', alpha=0.6, label='FGI'
+                    )
+                    ax1.set_ylabel('Price (USD)')
+                    ax1_twin.set_ylabel('Fear & Greed Index')
+                    ax1.set_title('Bitcoin Price vs Fear & Greed Index')
+                    ax1.legend(loc='upper left')
+                    ax1_twin.legend(loc='upper right')
+                    ax1.grid(True, alpha=0.3)
+
+                    valid = merged_market.dropna(
+                        subset=['returns', 'fear_greed_value']
+                    )
+                    if len(valid) > 10:
+                        ax2.scatter(
+                            valid['fear_greed_value'],
+                            valid['returns'],
+                            alpha=0.5, s=20
+                        )
+                        ax2.set_xlabel('Fear & Greed Index')
+                        ax2.set_ylabel('Daily Returns')
+                        ax2.set_title('Market Sentiment vs Returns')
+                        ax2.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+                        ax2.grid(True, alpha=0.3)
+
+                    plt.tight_layout()
+                    fig.savefig(
+                        str(self.output_dir / 'figures' / 'price_fgi_correlation.png'),
+                        dpi=300
+                    )
+                    plt.close(fig)
+                    self.logger.info("Generated price-FGI correlation plot")
+            except Exception as e:
+                self.logger.warning(
+                    f"Could not generate price correlation plot: {e}"
+                )
+
         self.logger.info(f"All visualizations saved to {self.output_dir / 'figures'}")
-        
+
     def run_all(
         self,
         start_date: Optional[str] = None,
@@ -850,17 +1004,21 @@ class CryptoCascadesPipeline:
             if self._estimated_params is None or self._seir_results is None:
                 self.logger.warning(f"Skipping period {period_name} due to missing results")
                 continue
-            
+
+            # Run per-period hypothesis tests
+            self.run_test()
+
             r0_value = self._estimated_params.r0()
             r0_ci = getattr(self._estimated_params, 'r0_ci', (r0_value * 0.9, r0_value * 1.1))
-            
+
             period_results[period_name] = {
                 'r0': r0_value,
                 'r0_ci': r0_ci,
                 'market_type': period_config.get('type', 'unknown'),
                 'description': period_config.get('description', period_name.capitalize()),
                 'estimated_params': self._estimated_params,
-                'seir_results': self._seir_results.copy()
+                'seir_results': self._seir_results.copy(),
+                'hypothesis_results': self._hypothesis_results
             }
             
             # Categorize by market type
