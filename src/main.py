@@ -193,6 +193,7 @@ class CryptoCascadesPipeline:
         self._graph = None
         self._transactions = None
         self._fgi_values = None
+        self._fgi_is_synthetic = False
         self._prices = None
         self._node_states = None
         self._seir_results = None
@@ -347,9 +348,11 @@ class CryptoCascadesPipeline:
         if fgi_file.exists():
             fgi_df = pd.read_csv(fgi_file)
             self._fgi_values = fgi_df['value'].values
+            self._fgi_is_synthetic = False
             self.logger.info(f"Loaded {len(self._fgi_values)} FGI values")
         else:
             self._fgi_values = np.random.uniform(30, 70, 365)
+            self._fgi_is_synthetic = True
             self.logger.warning("Using synthetic FGI values")
         
         price_file = market_dir / 'bitcoin_prices.csv'
@@ -513,6 +516,10 @@ class CryptoCascadesPipeline:
         t_max = self.config.get('simulation.t_max', 100)
         
         self.logger.info(f"Running mean-field simulation (N={N:,}, T={t_max})...")
+        if self._fgi_is_synthetic:
+            self.logger.warning(
+                "Simulation β-amplification is based on synthetic sentiment data"
+            )
         fgi_array: Optional[np.ndarray] = None
         if self._fgi_values is not None:
             fgi_array = np.asarray(self._fgi_values[:t_max])
@@ -572,6 +579,11 @@ class CryptoCascadesPipeline:
         N = self._graph.number_of_nodes()
         
         self.logger.info("Estimating SEIR parameters...")
+        if self._fgi_is_synthetic:
+            self.logger.warning(
+                "Parameter estimation using synthetic FGI data — "
+                "FOMO amplification estimates may not reflect real sentiment"
+            )
         fgi_array: Optional[np.ndarray] = None
         if self._fgi_values is not None:
             fgi_array = np.asarray(self._fgi_values)
@@ -640,9 +652,14 @@ class CryptoCascadesPipeline:
         if not infection_times_df.empty:
             self.logger.info(f"Including {len(infection_times_df)} node infection times for H4 test")
         
-        # Prepare FGI array
+        # Determine if real FGI data is available
+        fgi_is_unusable = (
+            self._fgi_values is None or self._fgi_is_synthetic
+        )
+
+        # Prepare FGI array — still needed for non-H3 tests
         fgi_array = np.asarray(self._fgi_values) if self._fgi_values is not None else np.array([50.0])
-        
+
         if hypothesis == 'all':
             self.logger.info("Testing all hypotheses...")
             self._hypothesis_results = tester.test_all(
@@ -653,10 +670,20 @@ class CryptoCascadesPipeline:
                 observed_data=self._seir_results,
                 infection_times_df=infection_times_df
             )
+            # Override H3 if FGI data is not real
+            if fgi_is_unusable:
+                self.logger.error(
+                    "Skipping H3: No real FGI data available. H3 requires actual "
+                    "Fear & Greed Index data to test sentiment-transmission correlation."
+                )
+                self._hypothesis_results['H3'] = tester._inconclusive_result(
+                    "H3",
+                    "No real FGI data available (using synthetic/fallback values)"
+                )
         else:
             self._hypothesis_results = {}
             self.logger.info(f"Testing hypothesis {hypothesis}...")
-            
+
             if hypothesis == 'H1':
                 self._hypothesis_results['H1'] = tester.test_h1_epidemic_dynamics(
                     state_history, self._estimated_params, self._seir_results
@@ -666,9 +693,19 @@ class CryptoCascadesPipeline:
                     self._graph, self._estimated_params
                 )
             elif hypothesis == 'H3':
-                self._hypothesis_results['H3'] = tester.test_h3_fgi_correlation(
-                    state_history, fgi_array
-                )
+                if fgi_is_unusable:
+                    self.logger.error(
+                        "Skipping H3: No real FGI data available. H3 requires actual "
+                        "Fear & Greed Index data to test sentiment-transmission correlation."
+                    )
+                    self._hypothesis_results['H3'] = tester._inconclusive_result(
+                        "H3",
+                        "No real FGI data available (using synthetic/fallback values)"
+                    )
+                else:
+                    self._hypothesis_results['H3'] = tester.test_h3_fgi_correlation(
+                        state_history, fgi_array
+                    )
             elif hypothesis == 'H4':
                 infection_times_df = getattr(self, '_infection_times_df', pd.DataFrame())
                 self._hypothesis_results['H4'] = tester.test_h4_centrality_effect(
@@ -850,17 +887,21 @@ class CryptoCascadesPipeline:
             if self._estimated_params is None or self._seir_results is None:
                 self.logger.warning(f"Skipping period {period_name} due to missing results")
                 continue
-            
+
+            # Run per-period hypothesis tests
+            self.run_test()
+
             r0_value = self._estimated_params.r0()
             r0_ci = getattr(self._estimated_params, 'r0_ci', (r0_value * 0.9, r0_value * 1.1))
-            
+
             period_results[period_name] = {
                 'r0': r0_value,
                 'r0_ci': r0_ci,
                 'market_type': period_config.get('type', 'unknown'),
                 'description': period_config.get('description', period_name.capitalize()),
                 'estimated_params': self._estimated_params,
-                'seir_results': self._seir_results.copy()
+                'seir_results': self._seir_results.copy(),
+                'hypothesis_results': self._hypothesis_results
             }
             
             # Categorize by market type
