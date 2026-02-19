@@ -6,7 +6,6 @@ pyarrow>=14.0.0  # For parquet files (ORBITAAL)
 
 # Network Analysis
 networkx>=3.1
-python-louvain>=0.16  # Community detection
 powerlaw>=1.5  # Power-law fitting
 
 # Epidemic Modeling
