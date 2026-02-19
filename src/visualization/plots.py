@@ -10,6 +10,8 @@ Creates publication-quality figures for FOMO contagion research:
 6. Parameter confidence intervals
 """
 
+import math
+
 import numpy as np
 import pandas as pd
 import networkx as nx
@@ -425,25 +427,50 @@ class SEIRVisualizer:
         ax1 = axes[0]
         hypotheses = sorted(results.keys())
         p_values = [results[h].p_value for h in hypotheses]
-        colors = ['#7FB069' if p < 0.05 else '#E94F37' for p in p_values]
-        
-        bars = ax1.bar(hypotheses, p_values, color=colors, alpha=0.8)
+
+        # Handle NaN (inconclusive) p-values
+        display_values = []
+        colors = []
+        inconclusive_indices = []
+        for i, p in enumerate(p_values):
+            if math.isnan(p):
+                display_values.append(0.5)  # Fixed height for inconclusive
+                colors.append('#999999')  # Gray
+                inconclusive_indices.append(i)
+            elif p < 0.05:
+                display_values.append(p)
+                colors.append('#7FB069')
+            else:
+                display_values.append(p)
+                colors.append('#E94F37')
+
+        bars = ax1.bar(hypotheses, display_values, color=colors, alpha=0.8)
+        # Add hatch pattern to inconclusive bars
+        for idx in inconclusive_indices:
+            bars[idx].set_hatch('//')
         ax1.axhline(y=0.05, color='black', linestyle='--', label='α = 0.05')
         ax1.set_ylabel('P-value')
         ax1.set_title('P-values by Hypothesis')
-        ax1.legend()
-        
-        # Add significance stars
+
+        # Build legend with Inconclusive entry if needed
+        legend_handles = [ax1.get_lines()[0]]
+        if inconclusive_indices:
+            inconclusive_patch = mpatches.Patch(
+                facecolor='#999999', hatch='//', alpha=0.8, label='Inconclusive'
+            )
+            legend_handles.append(inconclusive_patch)
+        ax1.legend(handles=legend_handles)
+
+        # Add significance stars or N/A label
         for i, (h, p) in enumerate(zip(hypotheses, p_values)):
-            if p < 0.001:
-                star = '***'
+            if math.isnan(p):
+                ax1.text(i, display_values[i] + 0.02, 'N/A', ha='center', fontsize=11, color='#666666')
+            elif p < 0.001:
+                ax1.text(i, p + 0.02, '***', ha='center', fontsize=14)
             elif p < 0.01:
-                star = '**'
+                ax1.text(i, p + 0.02, '**', ha='center', fontsize=14)
             elif p < 0.05:
-                star = '*'
-            else:
-                star = ''
-            ax1.text(i, p + 0.02, star, ha='center', fontsize=14)
+                ax1.text(i, p + 0.02, '*', ha='center', fontsize=14)
         
         # Right: Effect sizes
         ax2 = axes[1]
@@ -593,8 +620,25 @@ class SEIRVisualizer:
         ax3 = fig.add_subplot(gs[1, 0])
         hypotheses = sorted(hypothesis_results.keys())
         p_values = [hypothesis_results[h].p_value for h in hypotheses]
-        colors = ['#7FB069' if p < 0.05 else '#E94F37' for p in p_values]
-        ax3.bar(hypotheses, p_values, color=colors, alpha=0.8)
+        dash_display = []
+        dash_colors = []
+        dash_inconclusive = []
+        for idx, p in enumerate(p_values):
+            if math.isnan(p):
+                dash_display.append(0.5)
+                dash_colors.append('#999999')
+                dash_inconclusive.append(idx)
+            elif p < 0.05:
+                dash_display.append(p)
+                dash_colors.append('#7FB069')
+            else:
+                dash_display.append(p)
+                dash_colors.append('#E94F37')
+        dash_bars = ax3.bar(hypotheses, dash_display, color=dash_colors, alpha=0.8)
+        for idx in dash_inconclusive:
+            dash_bars[idx].set_hatch('//')
+        for idx in dash_inconclusive:
+            ax3.text(idx, dash_display[idx] + 0.02, 'N/A', ha='center', fontsize=9, color='#666666')
         ax3.axhline(y=0.05, color='black', linestyle='--')
         ax3.set_ylabel('P-value')
         ax3.set_title('Hypothesis Test P-values')
@@ -662,8 +706,11 @@ class SEIRVisualizer:
         
         for h in sorted(hypothesis_results.keys()):
             r = hypothesis_results[h]
-            status = "✓" if r.reject_null else "✗"
-            summary_text.append(f"  {h}: {status} (p={r.p_value:.3f})")
+            if math.isnan(r.p_value):
+                summary_text.append(f"  {h}: N/A (inconclusive)")
+            else:
+                status = "✓" if r.reject_null else "✗"
+                summary_text.append(f"  {h}: {status} (p={r.p_value:.3f})")
         
         ax7.text(0.1, 0.95, '\n'.join(summary_text), transform=ax7.transAxes,
                 fontsize=10, verticalalignment='top', fontfamily='monospace')
@@ -674,6 +721,69 @@ class SEIRVisualizer:
             fig.savefig(save_path)
             self.logger.info(f"Saved dashboard to {save_path}")
         
+        return fig
+
+    def plot_price_sentiment_overview(
+        self,
+        merged_market_df: pd.DataFrame,
+        save_path: Optional[str] = None
+    ) -> Figure:
+        """
+        Plot Bitcoin price vs Fear & Greed Index and sentiment vs returns.
+
+        Args:
+            merged_market_df: DataFrame with columns [datetime, price,
+                fear_greed_value, returns].
+            save_path: Path to save figure.
+
+        Returns:
+            matplotlib Figure
+        """
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+
+        ax1.plot(
+            merged_market_df['datetime'],
+            merged_market_df['price'],
+            'b-', label='BTC Price'
+        )
+        ax1_twin = ax1.twinx()
+        ax1_twin.plot(
+            merged_market_df['datetime'],
+            merged_market_df['fear_greed_value'],
+            'r-', alpha=0.6, label='FGI'
+        )
+        ax1.set_ylabel('Price (USD)')
+        ax1_twin.set_ylabel('Fear & Greed Index')
+        ax1.set_title('Bitcoin Price vs Fear & Greed Index')
+        ax1.legend(loc='upper left')
+        ax1_twin.legend(loc='upper right')
+        ax1.grid(True, alpha=0.3)
+
+        valid = merged_market_df.dropna(
+            subset=['returns', 'fear_greed_value']
+        )
+        if len(valid) > 10:
+            ax2.scatter(
+                valid['fear_greed_value'],
+                valid['returns'],
+                alpha=0.5, s=20
+            )
+            ax2.set_xlabel('Fear & Greed Index')
+            ax2.set_ylabel('Daily Returns')
+            ax2.set_title('Market Sentiment vs Returns')
+            ax2.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+            ax2.grid(True, alpha=0.3)
+        else:
+            ax2.text(0.5, 0.5, 'Insufficient data', transform=ax2.transAxes,
+                     ha='center', va='center', fontsize=14, color='gray')
+            ax2.set_title('Market Sentiment vs Returns')
+
+        plt.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path, dpi=300)
+            self.logger.info(f"Saved price-sentiment overview to {save_path}")
+
         return fig
 
     def plot_r0_comparison_by_period(
@@ -763,6 +873,199 @@ class SEIRVisualizer:
             fig.savefig(save_path)
             self.logger.info(f"Saved R₀ comparison plot to {save_path}")
         
+        return fig
+
+
+    def plot_early_warning_signals(
+        self,
+        ews_df: pd.DataFrame,
+        transition_point: Optional[int] = None,
+        title: str = "Epidemic Early Warning Signals",
+        save_path: Optional[str] = None
+    ) -> Figure:
+        """
+        Plot early warning signal indicators over time.
+
+        Args:
+            ews_df: DataFrame with columns [t, variance, autocorrelation,
+                skewness, alarm].
+            transition_point: Detected transition time-step, if any.
+            title: Plot title.
+            save_path: Path to save figure.
+
+        Returns:
+            matplotlib Figure
+        """
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+
+        t = np.asarray(ews_df['t'].values)
+
+        # Variance
+        axes[0].plot(t, ews_df['variance'], color='#E94F37', linewidth=1.5)
+        axes[0].set_ylabel('Variance')
+        axes[0].set_title('Rolling Variance')
+        axes[0].grid(True, alpha=0.3)
+
+        # Autocorrelation
+        axes[1].plot(t, ews_df['autocorrelation'], color='#2E86AB', linewidth=1.5)
+        axes[1].set_ylabel('Lag-1 Autocorrelation')
+        axes[1].set_title('Lag-1 Autocorrelation')
+        axes[1].grid(True, alpha=0.3)
+
+        # Skewness
+        axes[2].plot(t, ews_df['skewness'], color='#7FB069', linewidth=1.5)
+        axes[2].set_ylabel('Skewness')
+        axes[2].set_xlabel('Time')
+        axes[2].set_title('Rolling Skewness')
+        axes[2].grid(True, alpha=0.3)
+
+        # Mark alarm time-steps
+        if 'alarm' in ews_df.columns:
+            alarm_mask = ews_df['alarm'].astype(bool)
+            alarm_t = t[alarm_mask]
+            for ax in axes:
+                for at in alarm_t:
+                    ax.axvline(x=at, color='red', alpha=0.15, linewidth=1)
+
+        # Mark transition point
+        if transition_point is not None:
+            for ax in axes:
+                ax.axvline(x=transition_point, color='black', linestyle='--',
+                           linewidth=2, label=f'Transition (t={transition_point})')
+            axes[0].legend(loc='upper right')
+
+        fig.suptitle(title, fontsize=14, fontweight='bold')
+        plt.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path)
+            self.logger.info(f"Saved early warning signals to {save_path}")
+
+        return fig
+
+    def plot_topology_comparison(
+        self,
+        snap_degrees: np.ndarray,
+        orbitaal_degrees: np.ndarray,
+        ks_statistic: float,
+        ks_pvalue: float,
+        title: str = "SNAP vs ORBITAAL Degree Distribution",
+        save_path: Optional[str] = None
+    ) -> Figure:
+        """
+        Side-by-side histogram of SNAP and ORBITAAL degree distributions.
+
+        Args:
+            snap_degrees: Degree array from SNAP trust network.
+            orbitaal_degrees: Degree array from ORBITAAL transaction graph.
+            ks_statistic: KS test statistic from topology comparison.
+            ks_pvalue: KS test p-value.
+            title: Plot title.
+            save_path: Path to save figure.
+
+        Returns:
+            matplotlib Figure
+        """
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+        max_deg = max(
+            int(np.percentile(snap_degrees, 99)) if len(snap_degrees) else 1,
+            int(np.percentile(orbitaal_degrees, 99)) if len(orbitaal_degrees) else 1,
+        )
+        bins = np.linspace(0, max_deg, 50)
+
+        ax1.hist(snap_degrees, bins=bins, color='#E94F37', alpha=0.7,
+                 edgecolor='black', label='SNAP')
+        ax1.hist(orbitaal_degrees, bins=bins, color='#2E86AB', alpha=0.5,
+                 edgecolor='black', label='ORBITAAL')
+        ax1.set_xlabel('Degree')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title('Degree Distribution (linear)')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # Log-scale version
+        snap_nonzero = snap_degrees[snap_degrees > 0]
+        orb_nonzero = orbitaal_degrees[orbitaal_degrees > 0]
+        if len(snap_nonzero) > 0:
+            ax2.hist(snap_nonzero, bins=50, color='#E94F37', alpha=0.7,
+                     edgecolor='black', label='SNAP')
+        if len(orb_nonzero) > 0:
+            ax2.hist(orb_nonzero, bins=50, color='#2E86AB', alpha=0.5,
+                     edgecolor='black', label='ORBITAAL')
+        ax2.set_xlabel('Degree')
+        ax2.set_ylabel('Frequency')
+        ax2.set_title('Degree Distribution (log scale)')
+        ax2.set_yscale('log')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        fig.suptitle(
+            f'{title}\nKS statistic={ks_statistic:.4f}, p={ks_pvalue:.4f}',
+            fontsize=14, fontweight='bold'
+        )
+        plt.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path)
+            self.logger.info(f"Saved topology comparison to {save_path}")
+
+        return fig
+
+    def plot_trust_infection_boxplot(
+        self,
+        trust_infection_data: pd.DataFrame,
+        title: str = "Infection Time by Trust Category",
+        save_path: Optional[str] = None
+    ) -> Figure:
+        """
+        Boxplot comparing infection times for trusted, distrusted, and
+        neutral users.
+
+        Args:
+            trust_infection_data: DataFrame with columns
+                [trust_category, infection_time].
+            title: Plot title.
+            save_path: Path to save figure.
+
+        Returns:
+            matplotlib Figure
+        """
+        fig, ax = plt.subplots(figsize=(8, 6))
+
+        categories = ['trusted', 'neutral', 'distrusted']
+        cat_colors = {'trusted': '#7FB069', 'neutral': '#F6AE2D', 'distrusted': '#E94F37'}
+        data_groups = []
+        labels = []
+        box_colors = []
+        for cat in categories:
+            subset = trust_infection_data.loc[
+                trust_infection_data['trust_category'] == cat, 'infection_time'
+            ].dropna()
+            if len(subset) >= 2:
+                data_groups.append(subset.values)
+                labels.append(f"{cat.capitalize()}\n(n={len(subset)})")
+                box_colors.append(cat_colors[cat])
+
+        if not data_groups:
+            ax.text(0.5, 0.5, 'Insufficient data', transform=ax.transAxes,
+                    ha='center', va='center', fontsize=14, color='gray')
+        else:
+            bp = ax.boxplot(data_groups, tick_labels=labels, patch_artist=True)
+            for patch, color in zip(bp['boxes'], box_colors):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+
+        ax.set_ylabel('Infection Time')
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path)
+            self.logger.info(f"Saved trust infection boxplot to {save_path}")
+
         return fig
 
 

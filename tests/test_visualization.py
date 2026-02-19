@@ -238,6 +238,67 @@ class TestHypothesisResultsPlot:
         plt.close(fig)
 
 
+class TestHypothesisResultsInconclusiveNaN:
+    """Tests for inconclusive (NaN p-value) handling."""
+
+    def test_nan_pvalue_renders_gray_bar(self, visualizer):
+        """Test that NaN p-values render as gray bars with N/A annotation."""
+        import matplotlib.pyplot as plt
+        results = {}
+        for h in ['H1', 'H2', 'H4', 'H5']:
+            results[h] = HypothesisResult(
+                hypothesis=h, description=f"Test {h}",
+                test_statistic=2.0, p_value=0.01, effect_size=0.5,
+                confidence_interval=(0.1, 0.9), reject_null=True,
+                alpha=0.05, sample_size=100, additional_metrics={}
+            )
+        # H3 is inconclusive with NaN p-value
+        results['H3'] = HypothesisResult(
+            hypothesis='H3', description='Inconclusive',
+            test_statistic=float('nan'), p_value=float('nan'),
+            effect_size=float('nan'),
+            confidence_interval=(float('nan'), float('nan')),
+            reject_null=False, alpha=0.05, sample_size=0,
+            additional_metrics={'inconclusive': True}
+        )
+        fig = visualizer.plot_hypothesis_results(results)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_dashboard_nan_pvalue(
+        self, visualizer, sample_seir_results, sample_graph,
+        sample_node_states, sample_estimated_params, sample_fgi
+    ):
+        """Test dashboard handles NaN p-values in hypothesis results."""
+        import matplotlib.pyplot as plt
+        results = {}
+        for h in ['H1', 'H2', 'H4', 'H5']:
+            results[h] = HypothesisResult(
+                hypothesis=h, description=f"Test {h}",
+                test_statistic=2.0, p_value=0.01, effect_size=0.5,
+                confidence_interval=(0.1, 0.9), reject_null=True,
+                alpha=0.05, sample_size=100, additional_metrics={}
+            )
+        results['H3'] = HypothesisResult(
+            hypothesis='H3', description='Inconclusive',
+            test_statistic=float('nan'), p_value=float('nan'),
+            effect_size=float('nan'),
+            confidence_interval=(float('nan'), float('nan')),
+            reject_null=False, alpha=0.05, sample_size=0,
+            additional_metrics={'inconclusive': True}
+        )
+        fig = visualizer.create_summary_dashboard(
+            seir_results=sample_seir_results,
+            G=sample_graph,
+            node_states=sample_node_states,
+            hypothesis_results=results,
+            estimated_params=sample_estimated_params,
+            fgi_values=sample_fgi,
+        )
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+
 class TestSummaryDashboard:
     """Tests for the summary dashboard."""
 
@@ -257,6 +318,41 @@ class TestSummaryDashboard:
             fgi_values=sample_fgi,
         )
         assert isinstance(fig, Figure)
+        plt.close(fig)
+
+
+class TestPriceSentimentOverview:
+    """Tests for price-sentiment overview plot."""
+
+    def test_returns_figure(self, visualizer):
+        """Test that plot returns a matplotlib Figure."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        dates = pd.date_range('2020-01-01', periods=100, freq='D')
+        df = pd.DataFrame({
+            'datetime': dates,
+            'price': np.cumsum(np.random.randn(100)) + 10000,
+            'fear_greed_value': np.random.uniform(20, 80, 100),
+            'returns': np.random.randn(100) * 0.02,
+        })
+        fig = visualizer.plot_price_sentiment_overview(df)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_saves_to_file(self, visualizer, tmp_path):
+        """Test saving figure to file."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        dates = pd.date_range('2020-01-01', periods=100, freq='D')
+        df = pd.DataFrame({
+            'datetime': dates,
+            'price': np.cumsum(np.random.randn(100)) + 10000,
+            'fear_greed_value': np.random.uniform(20, 80, 100),
+            'returns': np.random.randn(100) * 0.02,
+        })
+        save_path = str(tmp_path / "test_price_sentiment.png")
+        fig = visualizer.plot_price_sentiment_overview(df, save_path=save_path)
+        assert Path(save_path).exists()
         plt.close(fig)
 
 
@@ -307,6 +403,100 @@ class TestCommunityInfectionHeatmap:
         fig = visualizer.plot_community_infection_heatmap(
             communities, infection_times
         )
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+
+class TestEarlyWarningSignalsPlot:
+    """Tests for early warning signals plot."""
+
+    def test_returns_figure(self, visualizer):
+        """Test that EWS plot returns a Figure."""
+        import matplotlib.pyplot as plt
+        ews_df = pd.DataFrame({
+            't': range(10, 100),
+            'variance': np.random.uniform(0, 0.01, 90),
+            'autocorrelation': np.random.uniform(0, 1, 90),
+            'skewness': np.random.uniform(-1, 1, 90),
+            'alarm': [False] * 70 + [True] * 20,
+        })
+        fig = visualizer.plot_early_warning_signals(ews_df, transition_point=80)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_saves_to_file(self, visualizer, tmp_path):
+        """Test saving figure to file."""
+        import matplotlib.pyplot as plt
+        ews_df = pd.DataFrame({
+            't': range(10, 50),
+            'variance': np.random.uniform(0, 0.01, 40),
+            'autocorrelation': np.random.uniform(0, 1, 40),
+            'skewness': np.random.uniform(-1, 1, 40),
+            'alarm': [False] * 40,
+        })
+        save_path = str(tmp_path / "test_ews.png")
+        fig = visualizer.plot_early_warning_signals(ews_df, save_path=save_path)
+        assert Path(save_path).exists()
+        plt.close(fig)
+
+
+class TestTopologyComparison:
+    """Tests for SNAP vs ORBITAAL topology comparison plot."""
+
+    def test_returns_figure(self, visualizer):
+        """Test that topology comparison plot returns a Figure."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        snap_deg = np.random.pareto(1.5, 500).astype(float)
+        orb_deg = np.random.pareto(1.5, 800).astype(float)
+        fig = visualizer.plot_topology_comparison(
+            snap_deg, orb_deg, ks_statistic=0.12, ks_pvalue=0.03
+        )
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_saves_to_file(self, visualizer, tmp_path):
+        """Test saving figure to file."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        snap_deg = np.random.pareto(1.5, 500).astype(float)
+        orb_deg = np.random.pareto(1.5, 800).astype(float)
+        save_path = str(tmp_path / "test_topo.png")
+        fig = visualizer.plot_topology_comparison(
+            snap_deg, orb_deg, ks_statistic=0.12, ks_pvalue=0.03,
+            save_path=save_path
+        )
+        assert Path(save_path).exists()
+        plt.close(fig)
+
+
+class TestTrustInfectionBoxplot:
+    """Tests for trust infection boxplot."""
+
+    def test_returns_figure(self, visualizer):
+        """Test that trust infection boxplot returns a Figure."""
+        import matplotlib.pyplot as plt
+        np.random.seed(42)
+        df = pd.DataFrame({
+            'trust_category': ['trusted'] * 20 + ['distrusted'] * 20 + ['neutral'] * 10,
+            'infection_time': np.concatenate([
+                np.random.uniform(5, 15, 20),
+                np.random.uniform(10, 25, 20),
+                np.random.uniform(8, 20, 10),
+            ]),
+        })
+        fig = visualizer.plot_trust_infection_boxplot(df)
+        assert isinstance(fig, Figure)
+        plt.close(fig)
+
+    def test_insufficient_data(self, visualizer):
+        """Test boxplot with too few data points."""
+        import matplotlib.pyplot as plt
+        df = pd.DataFrame({
+            'trust_category': ['trusted'],
+            'infection_time': [5.0],
+        })
+        fig = visualizer.plot_trust_infection_boxplot(df)
         assert isinstance(fig, Figure)
         plt.close(fig)
 

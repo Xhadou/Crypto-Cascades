@@ -127,6 +127,7 @@ hypothesis_testing:
 visualization:
   dpi: 300
   style: "whitegrid"
+  publication_style: null  # Set to 'nature', 'pnas', or 'science' for journal-ready figures
   figsize_main: [12, 8]
   figsize_multi: [14, 10]
   colors:

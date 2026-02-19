@@ -204,6 +204,9 @@ class CryptoCascadesPipeline:
         self._seir_results = None
         self._estimated_params = None
         self._hypothesis_results = None
+        self._sensitivity_df = None
+        self._community_partition = None
+        self._ews_indicators = None
         
     def run_download(self) -> None:
         """Phase 1: Download all required data."""
@@ -452,7 +455,8 @@ class CryptoCascadesPipeline:
         communities = community_result['partition']
         modularity = community_result['modularity']
         n_communities = community_result['n_communities']
-        
+        self._community_partition = communities
+
         self.logger.info(f"  Communities: {n_communities}")
         self.logger.info(f"  Modularity: {modularity:.4f}")
         
@@ -581,7 +585,23 @@ class CryptoCascadesPipeline:
         output_file = self.output_dir / 'data' / 'seir_results.csv'
         self._seir_results.to_csv(output_file, index=False)
         self.logger.info(f"Saved SEIR results to {output_file}")
-        
+
+        # Compute early warning signals
+        try:
+            from src.network_analysis.early_warning import EpidemicEarlyWarning
+            ews = EpidemicEarlyWarning()
+            self._ews_indicators = ews.compute_ews_indicators(self._seir_results)
+            if not self._ews_indicators.empty:
+                transition = ews.detect_transition_point(self._ews_indicators)
+                if transition is not None:
+                    self.logger.info(f"EWS transition point detected at t={transition}")
+                else:
+                    self.logger.info("No sustained EWS alarm detected")
+            else:
+                self.logger.info("EWS indicators empty (time series too short)")
+        except Exception as e:
+            self.logger.warning(f"Early warning signal computation failed: {e}")
+
     def run_estimate(self) -> None:
         """Phase 6: Parameter estimation."""
         self.logger.info("=" * 60)
@@ -636,7 +656,8 @@ class CryptoCascadesPipeline:
             N=N,
             fgi_values=fgi_array
         )
-        
+        self._sensitivity_df = sensitivity
+
         self.logger.info("Parameter sensitivities:")
         for _, row in sensitivity.iterrows():
             self.logger.info(f"  {row['parameter']}: elasticity = {row['elasticity']:.4f}")
@@ -776,6 +797,58 @@ class CryptoCascadesPipeline:
                 self.logger.info(
                     f"Saved SNAP validation report to {snap_output}"
                 )
+
+                # SNAP topology comparison visualization
+                topo = validation_results.get('topology', {})
+                if topo and not np.isnan(topo.get('degree_ks_statistic', float('nan'))):
+                    try:
+                        snap_df = validator.load_snap_networks(str(snap_dir))
+                        snap_graph = nx.from_pandas_edgelist(
+                            snap_df, source='source', target='target',
+                            create_using=nx.DiGraph()
+                        )
+                        snap_degrees = np.array([d for _, d in snap_graph.degree()], dtype=float)
+                        orb_degrees = np.array([d for _, d in self._graph.degree()], dtype=float)
+                        snap_viz = SEIRVisualizer(output_dir=str(self.output_dir / 'figures'))
+                        fig = snap_viz.plot_topology_comparison(
+                            snap_degrees, orb_degrees,
+                            ks_statistic=topo['degree_ks_statistic'],
+                            ks_pvalue=topo['degree_ks_pvalue'],
+                            save_path=str(self.output_dir / 'figures' / 'snap_topology_comparison.png')
+                        )
+                        plt.close(fig)
+                        self.logger.info("Generated SNAP topology comparison plot")
+                    except Exception as e:
+                        self.logger.warning(f"Could not generate SNAP topology plot: {e}")
+
+                # Trust vs infection time boxplot
+                tx = validation_results.get('trust_transmission', {})
+                if tx and not tx.get('inconclusive', True):
+                    try:
+                        trust_scores = validator.compute_trust_scores(
+                            validator.load_snap_networks(str(snap_dir))
+                        )
+                        infection_times_df = getattr(self, '_infection_times_df', pd.DataFrame())
+                        if not trust_scores.empty and not infection_times_df.empty:
+                            overlap = set(trust_scores.index) & set(infection_times_df['node'])
+                            if len(overlap) >= 20:
+                                overlap_trust = trust_scores.loc[trust_scores.index.isin(overlap)].copy()
+                                infection_map = dict(zip(
+                                    infection_times_df['node'],
+                                    infection_times_df['infection_time']
+                                ))
+                                overlap_trust['infection_time'] = overlap_trust.index.map(infection_map)
+                                overlap_trust = overlap_trust.dropna(subset=['infection_time'])
+                                snap_viz = SEIRVisualizer(output_dir=str(self.output_dir / 'figures'))
+                                fig = snap_viz.plot_trust_infection_boxplot(
+                                    overlap_trust,
+                                    save_path=str(self.output_dir / 'figures' / 'snap_trust_boxplot.png')
+                                )
+                                plt.close(fig)
+                                self.logger.info("Generated SNAP trust infection boxplot")
+                    except Exception as e:
+                        self.logger.warning(f"Could not generate SNAP trust boxplot: {e}")
+
             except Exception as e:
                 self.logger.warning(
                     f"SNAP trust network validation failed: {e}"
@@ -799,7 +872,17 @@ class CryptoCascadesPipeline:
             return
         
         viz = SEIRVisualizer(output_dir=str(self.output_dir / 'figures'))
-        
+
+        # Apply publication style if configured
+        pub_style = self.config.get('visualization.publication_style', None)
+        if pub_style:
+            try:
+                from src.visualization.publication_style import set_publication_style
+                set_publication_style(pub_style)
+                self.logger.info(f"Applied '{pub_style}' publication style")
+            except Exception as e:
+                self.logger.warning(f"Could not apply publication style '{pub_style}': {e}")
+
         # SEIR trajectory
         self.logger.info("Generating SEIR trajectory plot...")
         fgi_array: Optional[np.ndarray] = None
@@ -848,6 +931,90 @@ class CryptoCascadesPipeline:
                 save_path=str(self.output_dir / 'figures' / 'dashboard.png')
             )
         
+        # Network states visualization
+        if self._graph is not None and self._node_states is not None:
+            try:
+                G_plot = self._graph
+                states_plot = self._node_states
+                # Sample subgraph for large networks to avoid hanging
+                if G_plot.number_of_nodes() > 5000:
+                    sample_nodes = list(G_plot.nodes())[:5000]
+                    G_plot = G_plot.subgraph(sample_nodes).copy()
+                    states_plot = {n: self._node_states.get(n, State.SUSCEPTIBLE) for n in G_plot.nodes()}
+                    self.logger.info(f"Sampled subgraph to {G_plot.number_of_nodes()} nodes for visualization")
+                viz.plot_network_states(
+                    G_plot,
+                    states_plot,
+                    title="Network FOMO State",
+                    save_path=str(self.output_dir / 'figures' / 'network_states.png')
+                )
+                self.logger.info("Generated network states plot")
+            except Exception as e:
+                self.logger.warning(f"Could not generate network states plot: {e}")
+
+        # FGI correlation plot (requires real FGI + H3 results)
+        if (not self._fgi_is_synthetic
+                and self._hypothesis_results is not None
+                and 'H3' in self._hypothesis_results):
+            h3 = self._hypothesis_results['H3']
+            is_inconclusive = (
+                h3.additional_metrics.get('inconclusive', False)
+                or np.isnan(h3.p_value)
+            )
+            if not is_inconclusive and self._seir_results is not None:
+                try:
+                    I_vals = np.asarray(self._seir_results['I_frac'].values)
+                    infection_rate = np.diff(I_vals)
+                    min_len = min(len(self._fgi_values), len(infection_rate))
+                    fgi_aligned = np.asarray(self._fgi_values[:min_len])
+                    rate_aligned = infection_rate[:min_len]
+                    corr = h3.additional_metrics.get('correlation', h3.test_statistic)
+                    p_val = h3.p_value
+                    viz.plot_fgi_correlation(
+                        fgi_aligned,
+                        rate_aligned,
+                        correlation=corr,
+                        p_value=p_val,
+                        save_path=str(self.output_dir / 'figures' / 'fgi_correlation.png')
+                    )
+                    self.logger.info("Generated FGI correlation plot")
+                except Exception as e:
+                    self.logger.warning(f"Could not generate FGI correlation plot: {e}")
+
+        # Parameter sensitivity tornado chart
+        if self._sensitivity_df is not None:
+            try:
+                viz.plot_parameter_sensitivity(
+                    self._sensitivity_df,
+                    save_path=str(self.output_dir / 'figures' / 'parameter_sensitivity.png')
+                )
+                self.logger.info("Generated parameter sensitivity plot")
+            except Exception as e:
+                self.logger.warning(f"Could not generate parameter sensitivity plot: {e}")
+
+        # Community infection heatmap
+        if self._community_partition is not None:
+            try:
+                infection_times_df = getattr(self, '_infection_times_df', pd.DataFrame())
+                if not infection_times_df.empty:
+                    infection_times_dict = dict(
+                        zip(infection_times_df['node'], infection_times_df['infection_time'])
+                    )
+                    # Invert partition (node->comm) to (comm->nodes)
+                    comm_to_nodes: Dict[int, list] = {}
+                    for node, comm_id in self._community_partition.items():
+                        comm_to_nodes.setdefault(comm_id, []).append(node)
+                    viz.plot_community_infection_heatmap(
+                        comm_to_nodes,
+                        infection_times_dict,
+                        save_path=str(self.output_dir / 'figures' / 'community_infection_heatmap.png')
+                    )
+                    self.logger.info("Generated community infection heatmap")
+                else:
+                    self.logger.warning("Skipping community infection heatmap — no infection times available")
+            except Exception as e:
+                self.logger.warning(f"Could not generate community infection heatmap: {e}")
+
         # Price-FGI correlation plot (requires real price + FGI data)
         if (self._prices is not None
                 and self._fgi_values is not None
@@ -859,45 +1026,9 @@ class CryptoCascadesPipeline:
                 merged_market = merger.get_merged_data()
                 if not merged_market.empty:
                     merged_market = merger.compute_price_returns(merged_market)
-                    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-
-                    ax1.plot(
-                        merged_market['datetime'],
-                        merged_market['price'],
-                        'b-', label='BTC Price'
-                    )
-                    ax1_twin = ax1.twinx()
-                    ax1_twin.plot(
-                        merged_market['datetime'],
-                        merged_market['fear_greed_value'],
-                        'r-', alpha=0.6, label='FGI'
-                    )
-                    ax1.set_ylabel('Price (USD)')
-                    ax1_twin.set_ylabel('Fear & Greed Index')
-                    ax1.set_title('Bitcoin Price vs Fear & Greed Index')
-                    ax1.legend(loc='upper left')
-                    ax1_twin.legend(loc='upper right')
-                    ax1.grid(True, alpha=0.3)
-
-                    valid = merged_market.dropna(
-                        subset=['returns', 'fear_greed_value']
-                    )
-                    if len(valid) > 10:
-                        ax2.scatter(
-                            valid['fear_greed_value'],
-                            valid['returns'],
-                            alpha=0.5, s=20
-                        )
-                        ax2.set_xlabel('Fear & Greed Index')
-                        ax2.set_ylabel('Daily Returns')
-                        ax2.set_title('Market Sentiment vs Returns')
-                        ax2.axhline(y=0, color='k', linestyle='--', alpha=0.3)
-                        ax2.grid(True, alpha=0.3)
-
-                    plt.tight_layout()
-                    fig.savefig(
-                        str(self.output_dir / 'figures' / 'price_fgi_correlation.png'),
-                        dpi=300
+                    fig = viz.plot_price_sentiment_overview(
+                        merged_market,
+                        save_path=str(self.output_dir / 'figures' / 'price_fgi_correlation.png')
                     )
                     plt.close(fig)
                     self.logger.info("Generated price-FGI correlation plot")
@@ -905,6 +1036,21 @@ class CryptoCascadesPipeline:
                 self.logger.warning(
                     f"Could not generate price correlation plot: {e}"
                 )
+
+        # Early warning signals plot
+        if self._ews_indicators is not None and not self._ews_indicators.empty:
+            try:
+                from src.network_analysis.early_warning import EpidemicEarlyWarning
+                ews = EpidemicEarlyWarning()
+                transition = ews.detect_transition_point(self._ews_indicators)
+                viz.plot_early_warning_signals(
+                    self._ews_indicators,
+                    transition_point=transition,
+                    save_path=str(self.output_dir / 'figures' / 'early_warning_signals.png')
+                )
+                self.logger.info("Generated early warning signals plot")
+            except Exception as e:
+                self.logger.warning(f"Could not generate early warning signals plot: {e}")
 
         self.logger.info(f"All visualizations saved to {self.output_dir / 'figures'}")
 
@@ -1018,7 +1164,8 @@ class CryptoCascadesPipeline:
                 'description': period_config.get('description', period_name.capitalize()),
                 'estimated_params': self._estimated_params,
                 'seir_results': self._seir_results.copy(),
-                'hypothesis_results': self._hypothesis_results
+                'hypothesis_results': self._hypothesis_results,
+                'fgi_data_source': 'synthetic' if self._fgi_is_synthetic else 'real',
             }
             
             # Categorize by market type
@@ -1075,7 +1222,8 @@ class CryptoCascadesPipeline:
                 'r0': res['r0'],
                 'r0_ci_lower': res['r0_ci'][0],
                 'r0_ci_upper': res['r0_ci'][1],
-                'description': res['description']
+                'description': res['description'],
+                'fgi_data_source': res.get('fgi_data_source', 'unknown'),
             }
             for name, res in period_results.items() if name != 'h6_test'
         ])

@@ -13,12 +13,8 @@ import logging
 
 from src.utils.logger import get_logger
 
-# Try to import community detection libraries
-try:
-    import community as community_louvain  # python-louvain package
-    HAS_LOUVAIN = True
-except ImportError:
-    HAS_LOUVAIN = False
+# NetworkX >= 2.7 includes built-in Louvain community detection
+HAS_LOUVAIN = hasattr(nx.community, 'louvain_communities')
 
 
 class CommunityDetector:
@@ -53,24 +49,30 @@ class CommunityDetector:
                 - 'community_sizes': Dict mapping community ID to size
         """
         if not HAS_LOUVAIN:
-            self.logger.error("python-louvain package not installed")
-            return {'error': 'python-louvain not installed'}
-        
+            self.logger.error("networkx>=2.7 required for Louvain community detection")
+            return {'error': 'networkx>=2.7 required for louvain_communities'}
+
         self.logger.info("Detecting communities using Louvain algorithm...")
-        
+
         # Convert to undirected
         if G.is_directed():
             G = G.to_undirected()
-        
-        # Run Louvain algorithm
-        partition = community_louvain.best_partition(
+
+        # Run Louvain algorithm (returns a list of sets)
+        communities_list = nx.community.louvain_communities(
             G,
             resolution=resolution,
-            random_state=random_state
+            seed=random_state
         )
-        
+
+        # Convert list-of-sets to node->community dict
+        partition = {}
+        for comm_id, comm_nodes in enumerate(communities_list):
+            for node in comm_nodes:
+                partition[node] = comm_id
+
         # Calculate modularity
-        modularity = community_louvain.modularity(partition, G)
+        modularity = nx.community.modularity(G, communities_list)
         
         # Count community sizes
         community_sizes = {}
