@@ -252,33 +252,50 @@ class HypothesisTester:
         self.logger.info("Testing H6: R₀ differs between bull and bear markets...")
         
         bull_array = np.array(r0_bull_markets)
-        
-        # If we only have one or two bull market R0s, use different approach
+
+        # If we only have one or two bull market R0s, use permutation test
+        # (exact for tiny n, no distributional assumptions needed)
         if len(bull_array) < 3:
-            # Use simple comparison with bootstrap CI
             mean_bull = np.mean(bull_array)
-            diff = mean_bull - r0_bear_market
-            
-            # Bootstrap for CI
+            observed_diff = mean_bull - r0_bear_market
+
+            # Pool all R0 values and permute group labels
+            all_r0 = list(r0_bull_markets) + [r0_bear_market]
+            n_bull = len(r0_bull_markets)
+
+            n_perms = 10000
+            rng = np.random.default_rng(self.random_seed)
+            perm_diffs = []
+            for _ in range(n_perms):
+                shuffled = all_r0.copy()
+                rng.shuffle(shuffled)
+                perm_bull_mean = np.mean(shuffled[:n_bull])
+                perm_bear_mean = np.mean(shuffled[n_bull:])
+                perm_diffs.append(perm_bull_mean - perm_bear_mean)
+
+            # One-tailed: proportion of permutations where diff >= observed
+            p_value = float(np.mean([d >= observed_diff for d in perm_diffs]))
+            t_stat = observed_diff / (np.std(perm_diffs) + 1e-10)
+
+            # Effect size (standardized difference)
+            if len(bull_array) > 1 and np.std(bull_array) > 0:
+                effect_size = observed_diff / np.std(bull_array)
+            else:
+                effect_size = observed_diff  # Raw difference if can't standardize
+
+            # Bootstrap CI for the difference
             n_bootstrap = 1000
             bootstrap_diffs = []
             for _ in range(n_bootstrap):
-                boot_bulls = np.random.choice(bull_array, size=len(bull_array), replace=True)
+                boot_bulls = rng.choice(bull_array, size=len(bull_array), replace=True)
                 bootstrap_diffs.append(np.mean(boot_bulls) - r0_bear_market)
-            
+
             ci_lower = np.percentile(bootstrap_diffs, 2.5)
             ci_upper = np.percentile(bootstrap_diffs, 97.5)
-            
-            # Effect size (standardized difference)
-            if len(bull_array) > 1 and np.std(bull_array) > 0:
-                effect_size = diff / np.std(bull_array)
-            else:
-                effect_size = diff  # Raw difference if can't standardize
-            
-            # P-value approximation from bootstrap
-            p_value = np.mean(np.array(bootstrap_diffs) <= 0) if diff > 0 else np.mean(np.array(bootstrap_diffs) >= 0)
-            t_stat = diff / (np.std(bootstrap_diffs) + 1e-10)
-            
+
+            permutation_p_value = p_value
+            n_permutations = n_perms
+
         else:
             # Standard t-test with enough samples
             ttest_result = stats.ttest_1samp(bull_array, r0_bear_market)
@@ -300,10 +317,27 @@ class HypothesisTester:
             
             ci_lower = np.percentile(bootstrap_diffs, 2.5)
             ci_upper = np.percentile(bootstrap_diffs, 97.5)
-        
+
+            permutation_p_value = None
+            n_permutations = 0
+
         mean_bull = np.mean(bull_array)
         reject_null = p_value < self.alpha and mean_bull > r0_bear_market
-        
+
+        metrics = {
+            'r0_bull_mean': mean_bull,
+            'r0_bull_values': list(bull_array),
+            'r0_bear': r0_bear_market,
+            'r0_difference': mean_bull - r0_bear_market,
+            'bull_above_threshold': mean_bull > 1,
+            'bear_below_threshold': r0_bear_market < 1,
+            'interpretation': f"Bull R₀ ({mean_bull:.2f}) vs Bear R₀ ({r0_bear_market:.2f})"
+        }
+
+        if permutation_p_value is not None:
+            metrics['permutation_p_value'] = permutation_p_value
+            metrics['n_permutations'] = n_permutations
+
         return HypothesisResult(
             hypothesis="H6",
             description="R₀ is higher during bull markets than bear markets",
@@ -314,15 +348,7 @@ class HypothesisTester:
             reject_null=bool(reject_null),
             alpha=self.alpha,
             sample_size=len(bull_array) + 1,
-            additional_metrics={
-                'r0_bull_mean': mean_bull,
-                'r0_bull_values': list(bull_array),
-                'r0_bear': r0_bear_market,
-                'r0_difference': mean_bull - r0_bear_market,
-                'bull_above_threshold': mean_bull > 1,
-                'bear_below_threshold': r0_bear_market < 1,
-                'interpretation': f"Bull R₀ ({mean_bull:.2f}) vs Bear R₀ ({r0_bear_market:.2f})"
-            }
+            additional_metrics=metrics
         )
 
     def test_h1_epidemic_dynamics(

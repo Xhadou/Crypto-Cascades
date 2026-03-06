@@ -438,6 +438,66 @@ class TestH3OneTailed:
         assert not result.reject_null
 
 
+class TestH6Permutation:
+    """Tests for H6 permutation test for small-n R0 comparison."""
+
+    @pytest.fixture
+    def tester(self):
+        return HypothesisTester(alpha=0.05, random_seed=42)
+
+    def test_h6_uses_permutation_for_small_n(self, tester):
+        """H6 with small n should use permutation test."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[2.5, 3.1],
+            r0_bear_market=1.2
+        )
+        assert 'permutation_p_value' in result.additional_metrics
+
+    def test_h6_permutation_p_value_in_range(self, tester):
+        """H6 permutation p-value should be in [0, 1]."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[2.5, 3.1],
+            r0_bear_market=1.2
+        )
+        p = result.additional_metrics.get('permutation_p_value', -1)
+        assert 0 <= p <= 1
+
+    def test_h6_permutation_p_is_primary(self, tester):
+        """For small-n, the primary p_value should be the permutation p-value."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[2.5, 3.1],
+            r0_bear_market=1.2
+        )
+        assert result.p_value == result.additional_metrics['permutation_p_value']
+
+    def test_h6_permutation_detects_clear_difference(self, tester):
+        """Permutation test should detect a large bull vs bear difference."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[5.0, 6.0],
+            r0_bear_market=0.5
+        )
+        # With a large gap, the permutation p-value should be small
+        assert result.additional_metrics['permutation_p_value'] < 0.5
+
+    def test_h6_permutation_with_single_bull(self, tester):
+        """Permutation test should work with a single bull market R0."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[3.0],
+            r0_bear_market=1.0
+        )
+        assert 'permutation_p_value' in result.additional_metrics
+        assert 0 <= result.additional_metrics['permutation_p_value'] <= 1
+
+    def test_h6_n_permutations_reported(self, tester):
+        """Number of permutations should be reported in additional_metrics."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[2.5, 3.1],
+            r0_bear_market=1.2
+        )
+        assert 'n_permutations' in result.additional_metrics
+        assert result.additional_metrics['n_permutations'] >= 1000
+
+
 class TestH5Permutation:
     """Tests for H5 permutation test fix."""
 
