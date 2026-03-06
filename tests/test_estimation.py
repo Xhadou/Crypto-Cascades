@@ -578,5 +578,98 @@ class TestRollingR0:
         assert len(result) > 0
 
 
+@pytest.mark.slow
+class TestBayesianEstimation:
+    """Tests for Bayesian SEIR parameter estimation via NumPyro."""
+
+    def test_bayesian_import(self):
+        """BayesianEstimator should be importable."""
+        from src.estimation.bayesian_estimator import BayesianEstimator, HAS_NUMPYRO
+
+        if not HAS_NUMPYRO:
+            pytest.skip("numpyro not installed")
+        est = BayesianEstimator(num_warmup=10, num_samples=20)
+        assert est is not None
+
+    def test_bayesian_raises_without_numpyro(self):
+        """Should raise ImportError if numpyro is not installed."""
+        from src.estimation.bayesian_estimator import HAS_NUMPYRO
+
+        if HAS_NUMPYRO:
+            pytest.skip("numpyro IS installed")
+        from src.estimation.bayesian_estimator import BayesianEstimator
+
+        with pytest.raises(ImportError, match="NumPyro and JAX"):
+            BayesianEstimator()
+
+    def test_has_numpyro_flag_is_bool(self):
+        """HAS_NUMPYRO should be a boolean."""
+        from src.estimation.bayesian_estimator import HAS_NUMPYRO
+
+        assert isinstance(HAS_NUMPYRO, bool)
+
+    def test_bayesian_estimate_returns_estimation_result(self):
+        """Full MCMC run should return an EstimationResult."""
+        from src.estimation.bayesian_estimator import BayesianEstimator, HAS_NUMPYRO
+
+        if not HAS_NUMPYRO:
+            pytest.skip("numpyro not installed")
+
+        # Generate simple synthetic data
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=50)
+
+        est = BayesianEstimator(num_warmup=10, num_samples=20, random_seed=42)
+        result = est.estimate(data, N=5000)
+
+        assert isinstance(result, EstimationResult)
+        assert result.success is True
+        assert result.beta > 0
+        assert result.sigma > 0
+        assert result.gamma > 0
+        assert result.omega >= 0
+
+    def test_bayesian_credible_intervals(self):
+        """Posterior CIs should have lower <= upper."""
+        from src.estimation.bayesian_estimator import BayesianEstimator, HAS_NUMPYRO
+
+        if not HAS_NUMPYRO:
+            pytest.skip("numpyro not installed")
+
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=50)
+
+        est = BayesianEstimator(num_warmup=10, num_samples=20, random_seed=42)
+        result = est.estimate(data, N=5000)
+
+        assert result.beta_ci[0] <= result.beta_ci[1]
+        assert result.sigma_ci[0] <= result.sigma_ci[1]
+        assert result.gamma_ci[0] <= result.gamma_ci[1]
+        assert result.omega_ci[0] <= result.omega_ci[1]
+
+    def test_bayesian_posterior_samples_attached(self):
+        """Result should carry raw posterior samples for diagnostics."""
+        from src.estimation.bayesian_estimator import BayesianEstimator, HAS_NUMPYRO
+
+        if not HAS_NUMPYRO:
+            pytest.skip("numpyro not installed")
+
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=50)
+
+        est = BayesianEstimator(num_warmup=10, num_samples=20, random_seed=42)
+        result = est.estimate(data, N=5000)
+
+        assert hasattr(result, "posterior_samples")
+        assert "beta" in result.posterior_samples
+        assert "sigma" in result.posterior_samples
+        assert "gamma" in result.posterior_samples
+        assert "omega" in result.posterior_samples
+        assert len(result.posterior_samples["beta"]) == 20
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
