@@ -48,12 +48,18 @@ class OrbitaalParser:
     
     def _standardize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         """Standardize column names to expected format."""
+        # Detect satoshi column before renaming so we know to convert
+        has_satoshi_col = 'VALUE_SATOSHI' in df.columns
+
         # Rename columns based on mapping
         rename_dict = {old: new for old, new in self.COLUMN_MAPPING.items() if old in df.columns}
         df = df.rename(columns=rename_dict)
 
         # Convert satoshi to BTC if needed (1 BTC = 100,000,000 satoshi)
-        if 'btc_value' in df.columns and df['btc_value'].max() > 1e6:
+        # Prefer column-name detection over magnitude heuristic
+        if has_satoshi_col and 'btc_value' in df.columns:
+            df['btc_value'] = df['btc_value'] / 1e8
+        elif 'btc_value' in df.columns and df['btc_value'].max() > 1e6:
             df['btc_value'] = df['btc_value'] / 1e8
 
         return df
@@ -132,7 +138,7 @@ class OrbitaalParser:
         if 'timestamp' in df_clean.columns and len(df_clean) > 0:
             # Bitcoin launched Jan 3, 2009
             min_valid_ts = 1230940800  # 2009-01-03
-            max_valid_ts = 1740000000  # ~2025-02
+            max_valid_ts = 1900000000  # ~2030-03
 
             invalid_ts = (
                 (df_clean['timestamp'] < min_valid_ts) |

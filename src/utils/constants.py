@@ -10,13 +10,20 @@ import yaml
 from pathlib import Path
 
 
+_CONFIG_CACHE = None
+
+
 def _load_config() -> dict:
-    """Load configuration from config.yaml."""
-    config_path = Path(__file__).parent.parent.parent / "configs" / "config.yaml"
-    if config_path.exists():
-        with open(config_path, 'r') as f:
-            return yaml.safe_load(f)
-    return {}
+    """Load configuration from config.yaml (cached after first call)."""
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is None:
+        config_path = Path(__file__).parent.parent.parent / "configs" / "config.yaml"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                _CONFIG_CACHE = yaml.safe_load(f)
+        else:
+            _CONFIG_CACHE = {}
+    return _CONFIG_CACHE
 
 
 def get_threshold(key: str, default: float) -> float:

@@ -25,9 +25,21 @@ except ImportError:
 class NetworkMetrics:
     """Compute network metrics and centrality measures."""
     
-    def __init__(self):
-        """Initialize the network metrics calculator."""
+    def __init__(self, config: dict = None):
+        """Initialize the network metrics calculator.
+
+        Args:
+            config: Optional configuration dict. If provided, thresholds are
+                    read from config['thresholds']. Otherwise defaults are used.
+        """
         self.logger = get_logger(__name__)
+        cfg = config or {}
+        thresholds = cfg.get('thresholds', {})
+        self.large_graph_nodes = thresholds.get('large_graph_nodes', 10000)
+        self.max_nodes_centrality = thresholds.get('max_nodes_for_centrality', 5000)
+        self.betweenness_sample = thresholds.get('betweenness_sample_size', 500)
+        self.clustering_sample = thresholds.get('clustering_sample_size', 10000)
+        self.min_degrees_powerlaw = thresholds.get('min_degrees_for_powerlaw', 50)
         
     def compute_centrality_measures(
         self,
@@ -81,12 +93,12 @@ class NetworkMetrics:
         
         # Betweenness centrality (expensive - O(VE))
         if 'betweenness' in measures:
-            if n_nodes > 10000 and sample_size is None:
+            if n_nodes > self.large_graph_nodes and sample_size is None:
                 self.logger.warning(
                     f"Betweenness centrality on {n_nodes:,} nodes is expensive. "
-                    "Using k=500 sample approximation."
+                    f"Using k={self.betweenness_sample} sample approximation."
                 )
-                sample_size = min(500, n_nodes)
+                sample_size = min(self.betweenness_sample, n_nodes)
             
             self.logger.info("  Computing betweenness centrality...")
             try:
@@ -101,7 +113,7 @@ class NetworkMetrics:
         
         # Closeness centrality (expensive - O(V^2))
         if 'closeness' in measures:
-            if n_nodes > 5000:
+            if n_nodes > self.max_nodes_centrality:
                 self.logger.warning(
                     f"Closeness centrality on {n_nodes:,} nodes is expensive. Skipping."
                 )
@@ -149,7 +161,7 @@ class NetworkMetrics:
     def compute_clustering_coefficients(
         self,
         G: Union[nx.Graph, nx.DiGraph],
-        sample_size: int = 10000
+        sample_size: Optional[int] = None
     ) -> Dict[str, float]:
         """
         Compute clustering coefficients.
@@ -161,17 +173,20 @@ class NetworkMetrics:
         Returns:
             Dict with global and average local clustering coefficients
         """
+        if sample_size is None:
+            sample_size = self.clustering_sample
+
         self.logger.info("Computing clustering coefficients...")
-        
+
         # Convert to undirected for clustering
         if G.is_directed():
             G_undirected = G.to_undirected()
         else:
             G_undirected = G
-            
+
         results = {}
         n_nodes = G_undirected.number_of_nodes()
-        
+
         # Average local clustering coefficient
         # For large graphs, use sampling to avoid O(n*k^2) complexity
         try:
@@ -235,7 +250,7 @@ class NetworkMetrics:
         # Filter out zeros (powerlaw can't handle them)
         degrees = [d for d in degrees if d > 0]
         
-        if len(degrees) < 50:
+        if len(degrees) < self.min_degrees_powerlaw:
             self.logger.warning("Not enough non-zero degrees for power-law fit")
             return {'error': 'insufficient data'}
         
@@ -333,7 +348,7 @@ class NetworkMetrics:
         n = G.number_of_nodes()
         m = G.number_of_edges()
         
-        if n > 5000:
+        if n > self.max_nodes_centrality:
             self.logger.warning(
                 f"Small-world calculation on {n:,} nodes is expensive. "
                 "Consider using a smaller sample."
@@ -393,13 +408,15 @@ class NetworkMetrics:
         else:
             sigma = None
         
-        # Omega coefficient (alternative measure)
-        # ω = L_rand/L - C/C_lattice
-        # Approximate C_lattice ≈ 3/4 for ring lattice
-        C_lattice = 0.75
-        if L > 0:
-            omega = L_rand / L - C / C_lattice
+        # Omega coefficient via NetworkX (proper lattice + random comparison)
+        if n <= 1000:
+            try:
+                omega = nx.omega(G, niter=3, nrand=5)
+            except Exception as e:
+                self.logger.warning(f"Omega computation failed: {e}")
+                omega = None
         else:
+            self.logger.info(f"Graph too large ({n} nodes) for exact omega; skipping")
             omega = None
         
         results = {
