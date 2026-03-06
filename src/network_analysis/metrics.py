@@ -378,7 +378,7 @@ class NetworkMetrics:
             try:
                 C_rand_list.append(nx.average_clustering(G_rand))
                 L_rand_list.append(nx.average_shortest_path_length(G_rand))
-            except:
+            except (nx.NetworkXError, ValueError, ZeroDivisionError):
                 continue
         
         if not C_rand_list:

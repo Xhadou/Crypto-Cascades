@@ -128,7 +128,7 @@ class CommunityDetector:
         # Calculate modularity
         try:
             modularity = nx.community.modularity(G, communities)
-        except:
+        except (nx.NetworkXError, ValueError):
             modularity = None
         
         n_communities = len(community_sizes)

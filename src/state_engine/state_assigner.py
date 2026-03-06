@@ -326,7 +326,7 @@ class StateAssigner:
                     # For directed graph, also check predecessors (incoming edges)
                     neighbors.update(G.predecessors(wallet))  # type: ignore[union-attr]
                 has_infected_neighbor = bool(neighbors & infected_wallets)
-            except:
+            except (nx.NetworkXError, KeyError, ValueError):
                 pass
 
             if has_infected_neighbor:
@@ -526,7 +526,7 @@ class StateAssigner:
                 neighbors = set(G.neighbors(wallet))
                 if G.is_directed():
                     neighbors.update(G.predecessors(wallet))  # type: ignore[union-attr]
-            except:
+            except (nx.NetworkXError, KeyError, ValueError):
                 continue
                 
             for neighbor in neighbors:
