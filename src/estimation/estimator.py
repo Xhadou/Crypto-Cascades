@@ -429,14 +429,19 @@ class ParameterEstimator:
             result.r_squared = 1 - ss_res / ss_tot
         
         # AIC and BIC
-        n = t_max * 4  # 4 compartments
+        n = t_max * 4  # 4 compartments observed per time step
         k = 4  # 4 parameters (beta, sigma, gamma, omega)
-        
-        if result.loss > 0:
-            # Assuming loss is sum of squared residuals
-            sigma2 = result.loss / n
+
+        # Compute log-likelihood from actual residuals, not result.loss
+        # (result.loss may be soft_l1-transformed for LSQ, or NLL for MLE)
+        all_obs = np.concatenate([obs_fracs[f'{c}_frac'].values for c in ['S', 'E', 'I', 'R']])
+        all_sim = np.concatenate([sim[f'{c}_frac'].values for c in ['S', 'E', 'I', 'R']])
+        ssr = np.sum((all_obs - all_sim) ** 2)
+
+        if ssr > 0:
+            sigma2 = ssr / n
             ll = -n / 2 * (1 + np.log(2 * np.pi * sigma2))
-            
+
             result.aic = 2 * k - 2 * ll
             if n > k + 1:
                 result.aicc = result.aic + 2 * k * (k + 1) / (n - k - 1)

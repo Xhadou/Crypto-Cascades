@@ -183,9 +183,8 @@ class CryptoCascadesPipeline:
             self.config.load(config_path)
         self.output_dir = Path(output_dir)
         self.random_seed = random_seed
-        
-        np.random.seed(random_seed)
-        
+        self.rng = np.random.default_rng(random_seed)
+
         self.logger = get_logger(__name__)
         
         # Create output directories
@@ -345,7 +344,7 @@ class CryptoCascadesPipeline:
             self._fgi_is_synthetic = False
             self.logger.info(f"Loaded {len(self._fgi_values)} FGI values")
         else:
-            self._fgi_values = np.random.uniform(30, 70, 365)
+            self._fgi_values = self.rng.uniform(30, 70, 365)
             self._fgi_is_synthetic = True
             self.logger.warning("Using synthetic FGI values")
 
@@ -449,9 +448,12 @@ class CryptoCascadesPipeline:
         self.logger.info(f"  Density: {basic_stats['density']:.6f}")
         self.logger.info(f"  Avg clustering: {basic_stats['avg_clustering']:.4f}")
         
-        # Community detection
+        # Community detection (prefer Leiden when available)
         detector = CommunityDetector()
-        community_result = detector.detect_communities_louvain(self._graph)
+        if hasattr(detector, 'detect_communities_leiden'):
+            community_result = detector.detect_communities_leiden(self._graph)
+        else:
+            community_result = detector.detect_communities_louvain(self._graph)
         communities = community_result['partition']
         modularity = community_result['modularity']
         n_communities = community_result['n_communities']
@@ -463,10 +465,13 @@ class CryptoCascadesPipeline:
         # State assignment
         self.logger.info("Assigning SEIR states...")
         assigner = StateAssigner(
-            susceptible_window_days=7,
-            exposure_window_hours=24,
-            infected_threshold=0.0,
-            recovery_window_days=3
+            susceptible_window_days=self.config.get('state_assignment.susceptible.no_buy_window_days', 7),
+            exposure_window_hours=self.config.get('state_assignment.exposed.contact_window_hours', 24),
+            infected_threshold=self.config.get('state_assignment.infected.net_positive_threshold', 0.0),
+            recovery_window_days=self.config.get('state_assignment.recovered.dormancy_window_days', 3),
+            infected_z_threshold=self.config.get('state_assignment.infected.z_threshold', 1.5),
+            exposure_timeout_days=self.config.get('state_assignment.exposed.timeout_days', 14),
+            spontaneous_infection_rate=self.config.get('state_assignment.infected.spontaneous_rate', 0.001),
         )
         
         # Compute wallet flows for state assignment
@@ -489,11 +494,15 @@ class CryptoCascadesPipeline:
         state_counts = {}
         for state in self._node_states.values():
             state_counts[state.value] = state_counts.get(state.value, 0) + 1
-        
-        self.logger.info("State distribution:")
-        for state, count in sorted(state_counts.items()):
-            pct = 100 * count / len(self._node_states)
-            self.logger.info(f"  {state}: {count:,} ({pct:.1f}%)")
+
+        total_nodes = len(self._node_states)
+        if total_nodes > 0:
+            self.logger.info("State distribution:")
+            for state, count in sorted(state_counts.items()):
+                pct = 100 * count / total_nodes
+                self.logger.info(f"  {state}: {count:,} ({pct:.1f}%)")
+        else:
+            self.logger.warning("No node states assigned")
         
         # Save analysis results
         analysis_results = {
@@ -566,7 +575,7 @@ class CryptoCascadesPipeline:
             
             # Use smaller subgraph for network simulations
             if N > 5000:
-                nodes_sample = np.random.choice(list(self._graph.nodes()), 5000, replace=False)
+                nodes_sample = self.rng.choice(list(self._graph.nodes()), 5000, replace=False)
                 G_sample = self._graph.subgraph(nodes_sample).copy()
             else:
                 G_sample = self._graph
@@ -757,6 +766,12 @@ class CryptoCascadesPipeline:
             elif hypothesis == 'H5':
                 self._hypothesis_results['H5'] = tester.test_h5_community_clustering(
                     self._graph, state_history
+                )
+            elif hypothesis == 'H6':
+                self.logger.info("H6 requires three-period analysis. Use --phase three-period instead.")
+                self._hypothesis_results['H6'] = tester._inconclusive_result(
+                    "H6",
+                    "H6 requires three-period analysis with bull/bear R₀ comparison"
                 )
         
         # Print report
@@ -1338,27 +1353,27 @@ class CryptoCascadesPipeline:
         
         n_transactions = 10000
         n_wallets = 1000
-        
-        np.random.seed(self.random_seed)
-        
+
+        rng = np.random.default_rng(self.random_seed)
+
         # Power-law degree distribution
-        sources = np.random.pareto(1.5, n_transactions).astype(int) % n_wallets
-        targets = np.random.pareto(1.5, n_transactions).astype(int) % n_wallets
-        
+        sources = rng.pareto(1.5, n_transactions).astype(int) % n_wallets
+        targets = rng.pareto(1.5, n_transactions).astype(int) % n_wallets
+
         # Ensure no self-loops
         mask = sources != targets
         sources = sources[mask]
         targets = targets[mask]
-        
+
         # Generate timestamps over a year
         start = pd.Timestamp('2017-01-01')
         timestamps = start + pd.to_timedelta(
-            np.random.uniform(0, 365, len(sources)), unit='D'
+            rng.uniform(0, 365, len(sources)), unit='D'
         )
-        
+
         # Generate values
-        btc_values = np.random.lognormal(0, 2, len(sources))
-        usd_values = btc_values * np.random.uniform(5000, 20000, len(sources))
+        btc_values = rng.lognormal(0, 2, len(sources))
+        usd_values = btc_values * rng.uniform(5000, 20000, len(sources))
         
         return pd.DataFrame({
             'source_id': sources,
