@@ -457,5 +457,126 @@ class TestOmegaEstimation:
         assert result.aic != 0.0 or result.loss == 0.0
 
 
+class TestRollingR0:
+    """Tests for rolling-window R0 estimation."""
+
+    def test_rolling_r0_returns_timeseries(self):
+        """Rolling window R0 should return time-indexed DataFrame."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        dates = pd.date_range('2017-10-01', periods=120)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 120),
+            'E_frac': np.linspace(0.02, 0.1, 120),
+            'I_frac': np.linspace(0.05, 0.3, 120),
+            'R_frac': np.linspace(0.03, 0.1, 120),
+        })
+        result = estimate_rolling_r0(data, window_days=30, step_days=7, N=5000)
+        assert 'R0' in result.columns
+        assert 'window_start' in result.columns
+        assert len(result) > 1
+
+    def test_rolling_r0_has_all_columns(self):
+        """Result should include beta, sigma, gamma, omega, and window bounds."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        dates = pd.date_range('2017-10-01', periods=120)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 120),
+            'E_frac': np.linspace(0.02, 0.1, 120),
+            'I_frac': np.linspace(0.05, 0.3, 120),
+            'R_frac': np.linspace(0.03, 0.1, 120),
+        })
+        result = estimate_rolling_r0(data, window_days=30, step_days=7, N=5000)
+        for col in ['window_start', 'window_end', 'R0', 'beta', 'sigma', 'gamma', 'omega']:
+            assert col in result.columns, f"Missing column: {col}"
+
+    def test_rolling_r0_window_count(self):
+        """Number of windows should match expected from data length, window, and step."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        n_points = 100
+        window_days = 30
+        step_days = 10
+        dates = pd.date_range('2017-10-01', periods=n_points)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, n_points),
+            'E_frac': np.linspace(0.02, 0.1, n_points),
+            'I_frac': np.linspace(0.05, 0.3, n_points),
+            'R_frac': np.linspace(0.03, 0.1, n_points),
+        })
+        result = estimate_rolling_r0(data, window_days=window_days, step_days=step_days, N=5000)
+        # Maximum possible windows (some may fail, but at least 1 should succeed)
+        max_windows = len(range(0, n_points - window_days + 1, step_days))
+        assert 1 <= len(result) <= max_windows
+
+    def test_rolling_r0_positive_values(self):
+        """All R0 values should be positive."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        dates = pd.date_range('2017-10-01', periods=120)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 120),
+            'E_frac': np.linspace(0.02, 0.1, 120),
+            'I_frac': np.linspace(0.05, 0.3, 120),
+            'R_frac': np.linspace(0.03, 0.1, 120),
+        })
+        result = estimate_rolling_r0(data, window_days=30, step_days=7, N=5000)
+        assert (result['R0'] > 0).all()
+
+    def test_rolling_r0_rejects_short_window(self):
+        """Should raise ValueError if window_days < 10."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        dates = pd.date_range('2017-10-01', periods=120)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 120),
+            'E_frac': np.linspace(0.02, 0.1, 120),
+            'I_frac': np.linspace(0.05, 0.3, 120),
+            'R_frac': np.linspace(0.03, 0.1, 120),
+        })
+        with pytest.raises(ValueError, match="too small"):
+            estimate_rolling_r0(data, window_days=5, step_days=2, N=5000)
+
+    def test_rolling_r0_rejects_insufficient_data(self):
+        """Should raise ValueError if data has fewer rows than window_days."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        dates = pd.date_range('2017-10-01', periods=20)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 20),
+            'E_frac': np.linspace(0.02, 0.1, 20),
+            'I_frac': np.linspace(0.05, 0.3, 20),
+            'R_frac': np.linspace(0.03, 0.1, 20),
+        })
+        with pytest.raises(ValueError, match="need at least window_days"):
+            estimate_rolling_r0(data, window_days=30, step_days=7, N=5000)
+
+    def test_rolling_r0_with_fgi_values(self):
+        """Should accept and slice fgi_values per window."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        n_points = 120
+        dates = pd.date_range('2017-10-01', periods=n_points)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, n_points),
+            'E_frac': np.linspace(0.02, 0.1, n_points),
+            'I_frac': np.linspace(0.05, 0.3, n_points),
+            'R_frac': np.linspace(0.03, 0.1, n_points),
+        })
+        fgi = np.linspace(20, 80, n_points)
+        result = estimate_rolling_r0(
+            data, window_days=30, step_days=7, N=5000, fgi_values=fgi
+        )
+        assert len(result) > 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
