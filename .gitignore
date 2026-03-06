@@ -53,5 +53,13 @@ Thumbs.db
 *.log
 logs/
 
+# Results
+results/
+
+# Stderr captures
+pipe_stderr.txt
+stderr.txt
+test_stderr.txt
+
 # Git worktrees
 .worktrees/
