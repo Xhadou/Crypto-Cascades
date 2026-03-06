@@ -311,5 +311,66 @@ class TestMonteCarloSimulations:
             assert np.all(mean <= q95 + 0.1)
 
 
+class TestSolveIVP:
+    """Tests for solve_ivp migration (replacing legacy odeint)."""
+
+    def test_meanfield_uses_solve_ivp(self):
+        """simulate_meanfield should use solve_ivp, not odeint."""
+        import inspect
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        source = inspect.getsource(model.simulate_meanfield)
+        assert 'solve_ivp' in source, "simulate_meanfield should use solve_ivp"
+        assert 'odeint' not in source, "simulate_meanfield should not use odeint"
+
+    def test_solve_ivp_population_conservation(self):
+        """solve_ivp integration should conserve total population."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.0)
+        model = NetworkSEIR(params, random_seed=42)
+        N = 10000
+        result = model.simulate_meanfield(N=N, initial_infected=10, t_max=100)
+        total = result['S'] + result['E'] + result['I'] + result['R']
+        assert np.allclose(total, N, rtol=1e-6), (
+            f"Population not conserved: min={total.min()}, max={total.max()}"
+        )
+
+    def test_solve_ivp_with_fgi_values(self):
+        """solve_ivp should handle time-varying beta via FGI correctly."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.01)
+        model = NetworkSEIR(params, random_seed=42)
+        fgi_values = np.linspace(30, 80, 100)
+        result = model.simulate_meanfield(
+            N=5000, initial_infected=10, t_max=100, fgi_values=fgi_values
+        )
+        # Should have time-varying beta_eff
+        assert 'beta_eff' in result.columns
+        assert result['beta_eff'].nunique() > 1, "beta_eff should vary over time"
+        # Population should still be conserved
+        total = result['S'] + result['E'] + result['I'] + result['R']
+        assert np.allclose(total, 5000, rtol=1e-4)
+
+    def test_solve_ivp_matches_epidemic_dynamics(self):
+        """solve_ivp results should show proper SEIR epidemic dynamics."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.0)
+        model = NetworkSEIR(params, random_seed=42)
+        result = model.simulate_meanfield(N=10000, initial_infected=10, t_max=200)
+        # Epidemic should grow (R0=3)
+        assert result['I'].max() > result['I'].iloc[0] * 5
+        # Should peak and decline
+        max_idx = result['I'].idxmax()
+        assert result['I'].iloc[-1] < result['I'].iloc[max_idx]
+        # Non-negative values
+        for col in ['S', 'E', 'I', 'R']:
+            assert (result[col] >= 0).all(), f"Negative values in {col}"
+
+    def test_solve_ivp_no_odeint_import(self):
+        """The module should import solve_ivp, not odeint."""
+        import inspect
+        import src.epidemic_model.network_seir as module
+        source = inspect.getsource(module)
+        assert 'from scipy.integrate import solve_ivp' in source
+        assert 'from scipy.integrate import odeint' not in source
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

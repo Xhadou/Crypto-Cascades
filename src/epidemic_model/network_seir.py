@@ -22,7 +22,7 @@ Where:
 import numpy as np
 import pandas as pd
 import networkx as nx
-from scipy.integrate import odeint
+from scipy.integrate import solve_ivp
 from typing import Dict, List, Optional, Tuple, Union, Callable, Any, Literal, overload
 from dataclasses import dataclass
 from enum import Enum
@@ -112,8 +112,8 @@ class NetworkSEIR:
         
     def _seir_ode(
         self,
-        y: np.ndarray,
         t: float,
+        y: np.ndarray,
         N: int,
         beta: float,
         sigma: float,
@@ -121,17 +121,17 @@ class NetworkSEIR:
         omega: float
     ) -> List[float]:
         """
-        SEIR ODE system for scipy.integrate.odeint.
-        
+        SEIR ODE system for scipy.integrate.solve_ivp.
+
         Args:
-            y: State vector [S, E, I, R]
             t: Time
+            y: State vector [S, E, I, R]
             N: Total population
             beta: Effective transmission rate
             sigma: Incubation rate
             gamma: Recovery rate
             omega: Immunity waning rate
-            
+
         Returns:
             Derivatives [dS/dt, dE/dt, dI/dt, dR/dt]
         """
@@ -178,21 +178,51 @@ class NetworkSEIR:
         
         # Time points
         t = np.arange(0, t_max, dt)
-        
+
+        y0 = [S0, E0, I0, R0]
+
+        # Build ODE function with time-varying beta via closure
+        if fgi_values is not None:
+            def ode_func(t_val, y_val):
+                idx = min(int(t_val), len(fgi_values) - 1)
+                beta_eff = self.params.effective_beta(fgi_values[idx])
+                return self._seir_ode(
+                    t_val, y_val, N, beta_eff,
+                    self.params.sigma, self.params.gamma, self.params.omega
+                )
+        else:
+            def ode_func(t_val, y_val):
+                return self._seir_ode(
+                    t_val, y_val, N, self.params.beta,
+                    self.params.sigma, self.params.gamma, self.params.omega
+                )
+
+        # Solve the full ODE system in one call with RK45
+        sol = solve_ivp(
+            ode_func,
+            t_span=[t[0], t[-1]],
+            y0=y0,
+            method='RK45',
+            t_eval=t,
+            rtol=1e-8,
+            atol=1e-8
+        )
+
+        # Build results from sol.y (shape: 4 x len(t))
         results = []
-        y = [S0, E0, I0, R0]
-        
-        for i, ti in enumerate(t):
-            # Get effective beta
-            if fgi_values is not None and i < len(fgi_values):
-                beta_eff = self.params.effective_beta(fgi_values[i])
+        for i in range(len(sol.t)):
+            S, E, I, R = sol.y[:, i]
+            # Clamp to non-negative (numerical noise can push slightly below 0)
+            S, E, I, R = max(S, 0), max(E, 0), max(I, 0), max(R, 0)
+
+            if fgi_values is not None:
+                idx = min(int(sol.t[i]), len(fgi_values) - 1)
+                beta_eff = self.params.effective_beta(fgi_values[idx])
             else:
                 beta_eff = self.params.beta
-                
-            # Store current state
-            S, E, I, R = y
+
             results.append({
-                't': ti,
+                't': sol.t[i],
                 'S': S,
                 'E': E,
                 'I': I,
@@ -201,20 +231,9 @@ class NetworkSEIR:
                 'E_frac': E / N,
                 'I_frac': I / N,
                 'R_frac': R / N,
-                'beta_eff': beta_eff
+                'beta_eff': beta_eff,
             })
-            
-            # Integrate one step
-            if i < len(t) - 1:
-                t_span = [ti, t[i + 1]]
-                sol = odeint(
-                    self._seir_ode,
-                    y,
-                    t_span,
-                    args=(N, beta_eff, self.params.sigma, self.params.gamma, self.params.omega)
-                )
-                y = sol[-1]
-        
+
         return pd.DataFrame(results)
     
     def simulate_network_stochastic(
