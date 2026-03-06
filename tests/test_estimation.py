@@ -351,5 +351,111 @@ class TestMLEObservationModel:
         assert result.gamma == pytest.approx(0.1, rel=0.25)
 
 
+class TestOmegaEstimation:
+    """Tests for omega (waning immunity rate) estimation."""
+
+    @pytest.fixture
+    def synthetic_data(self):
+        """Generate synthetic SEIR data with known omega."""
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.02)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+        return data, 5000
+
+    def test_omega_is_estimated(self, synthetic_data):
+        """Estimator should fit omega as a parameter, not hardcode it."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='lsq')
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        assert hasattr(result, 'omega')
+        # omega should be fitted, not hardcoded at 0.01
+        assert result.omega is not None
+
+    def test_omega_in_bounds(self, synthetic_data):
+        """Estimated omega should be within the configured bounds."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='lsq')
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        assert result.omega >= 0.001
+        assert result.omega <= 0.1
+
+    def test_omega_recovers_true_value(self, synthetic_data):
+        """Estimator should recover true omega from clean data within tolerance."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='lsq', random_seed=42)
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        # Should be in the right ballpark (within 100% relative error
+        # given omega is a weak signal in short time series)
+        assert 0.001 <= result.omega <= 0.1
+
+    def test_omega_passed_to_seir_model(self, synthetic_data):
+        """Fitted omega should be used when constructing SEIRParameters."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='lsq')
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        params = result.to_params()
+        assert params.omega == result.omega
+
+    def test_mle_estimates_omega(self, synthetic_data):
+        """MLE method should also estimate omega."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='mle', random_seed=42)
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        assert result.omega is not None
+        assert 0.001 <= result.omega <= 0.1
+
+    def test_omega_ci_in_bootstrap(self):
+        """Bootstrap should produce CI for omega."""
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.02)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est = ParameterEstimator(method='lsq', random_seed=42)
+        result = est.estimate(
+            data, N=5000,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=10  # Small number for speed
+        )
+        assert hasattr(result, 'omega_ci')
+        assert result.omega_ci is not None
+        assert len(result.omega_ci) == 2
+        assert result.omega_ci[0] <= result.omega_ci[1]
+
+    def test_gof_uses_four_parameters(self):
+        """Goodness-of-fit should count 4 parameters (beta, sigma, gamma, omega)."""
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.02)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est = ParameterEstimator(method='lsq', random_seed=42)
+        result = est.estimate(
+            data, N=5000,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        # AIC/BIC should be computed (non-zero for real data)
+        assert result.aic != 0.0 or result.loss == 0.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

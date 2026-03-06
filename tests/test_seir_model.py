@@ -481,5 +481,74 @@ class TestRNG:
         )
 
 
+class TestCoriRt:
+    """Tests for Cori et al. (2013) R(t) estimation."""
+
+    @pytest.fixture
+    def seir_data(self):
+        """Generate SEIR data with a clear epidemic for R(t) estimation."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.01)
+        model = NetworkSEIR(params, random_seed=42)
+        return model.simulate_meanfield(N=10000, initial_infected=10, t_max=100)
+
+    def test_compute_rt_returns_dataframe(self, seir_data):
+        """compute_time_varying_r0 should return a DataFrame."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        rt_df = model.compute_time_varying_r0(seir_data)
+        assert isinstance(rt_df, pd.DataFrame)
+        assert len(rt_df) > 0
+
+    def test_compute_rt_has_rt_column(self, seir_data):
+        """Result should contain R_t column."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        rt_df = model.compute_time_varying_r0(seir_data)
+        assert 'R_t' in rt_df.columns
+
+    def test_cori_method_available(self, seir_data):
+        """compute_time_varying_r0 should accept method='cori'."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        rt_df = model.compute_time_varying_r0(seir_data, method='cori')
+        assert isinstance(rt_df, pd.DataFrame)
+        assert len(rt_df) > 0
+
+    def test_cori_rt_has_rt_column(self, seir_data):
+        """Cori method should produce R_t column."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        rt_df = model.compute_time_varying_r0(seir_data, method='cori')
+        assert 'R_t' in rt_df.columns
+
+    def test_ratio_method_still_works(self, seir_data):
+        """Ratio method should continue to work as before."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        rt_df = model.compute_time_varying_r0(seir_data, method='ratio')
+        assert isinstance(rt_df, pd.DataFrame)
+        assert 'R_t' in rt_df.columns
+        assert len(rt_df) > 0
+
+    def test_cori_fallback_on_import_error(self, seir_data):
+        """If epyestim is unavailable, Cori method should fall back to ratio."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        # Even if epyestim is not installed, method='cori' should not raise
+        rt_df = model.compute_time_varying_r0(seir_data, method='cori')
+        assert isinstance(rt_df, pd.DataFrame)
+        assert len(rt_df) > 0
+
+    def test_rt_values_are_reasonable(self, seir_data):
+        """R(t) estimates should be non-negative and not astronomically large."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        rt_df = model.compute_time_varying_r0(seir_data)
+        valid_rt = rt_df['R_t'].dropna()
+        if len(valid_rt) > 0:
+            assert (valid_rt >= 0).all(), "R(t) should be non-negative"
+            assert valid_rt.max() < 100, "R(t) should not be astronomically large"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

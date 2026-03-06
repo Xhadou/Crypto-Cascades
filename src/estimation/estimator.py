@@ -31,11 +31,12 @@ class EstimationResult:
     sigma: float
     gamma: float
     omega: float = 0.01
-    
+
     # Uncertainty quantification
     beta_ci: Tuple[float, float] = (0.0, 1.0)
     sigma_ci: Tuple[float, float] = (0.0, 1.0)
     gamma_ci: Tuple[float, float] = (0.0, 1.0)
+    omega_ci: Tuple[float, float] = (0.001, 0.1)
     
     # Goodness of fit
     loss: float = 0.0
@@ -100,6 +101,7 @@ class ParameterEstimator:
             'beta': (0.01, 1.0),
             'sigma': (0.01, 1.0),
             'gamma': (0.01, 1.0),
+            'omega': (0.001, 0.1),
         }
         
     def _compute_block_length(self, t_max: int) -> int:
@@ -141,7 +143,9 @@ class ParameterEstimator:
         self.logger.info(f"Estimating parameters using {self.method} method...")
         
         if initial_guess is None:
-            initial_guess = {'beta': 0.3, 'sigma': 0.2, 'gamma': 0.1}
+            initial_guess = {'beta': 0.3, 'sigma': 0.2, 'gamma': 0.1, 'omega': 0.01}
+        if 'omega' not in initial_guess:
+            initial_guess['omega'] = 0.01
         
         if self.method == 'lsq':
             result = self._estimate_lsq(observed_data, N, fgi_values, initial_guess)
@@ -161,7 +165,7 @@ class ParameterEstimator:
         
         self.logger.info(
             f"Estimation complete: β={result.beta:.4f}, σ={result.sigma:.4f}, "
-            f"γ={result.gamma:.4f}, R₀={result.r0():.3f}"
+            f"γ={result.gamma:.4f}, ω={result.omega:.4f}, R₀={result.r0():.3f}"
         )
         
         return result
@@ -173,28 +177,28 @@ class ParameterEstimator:
         fgi_values: Optional[np.ndarray],
         initial_guess: Dict[str, float]
     ) -> EstimationResult:
-        """Nonlinear least squares estimation."""
-        
+        """Nonlinear least squares estimation with 4 parameters (β, σ, γ, ω)."""
+
         # Normalize data
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
-        
+
         def residuals(params):
             """Compute residuals between observed and simulated."""
-            beta, sigma, gamma = params
-            
+            beta, sigma, gamma, omega = params
+
             seir_params = SEIRParameters(
-                beta=beta, sigma=sigma, gamma=gamma, omega=0.01,
+                beta=beta, sigma=sigma, gamma=gamma, omega=omega,
                 fomo_enabled=fgi_values is not None
             )
             model = NetworkSEIR(seir_params)
-            
+
             # Get initial conditions
             I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
-            
+
             # Run simulation
             sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
-            
+
             # Compute residuals for all compartments
             res = np.concatenate([
                 np.asarray(sim['S_frac'].values) - np.asarray(obs_fracs['S_frac'].values),
@@ -202,18 +206,22 @@ class ParameterEstimator:
                 np.asarray(sim['I_frac'].values) - np.asarray(obs_fracs['I_frac'].values),
                 np.asarray(sim['R_frac'].values) - np.asarray(obs_fracs['R_frac'].values),
             ])
-            
+
             return res
-        
-        # Initial guess
-        x0 = [initial_guess['beta'], initial_guess['sigma'], initial_guess['gamma']]
-        
-        # Bounds
+
+        # Initial guess — 4 parameters
+        omega_init = initial_guess.get('omega', 0.01)
+        x0 = [initial_guess['beta'], initial_guess['sigma'],
+              initial_guess['gamma'], omega_init]
+
+        # Bounds — 4 parameters
         bounds = (
-            [self.bounds['beta'][0], self.bounds['sigma'][0], self.bounds['gamma'][0]],
-            [self.bounds['beta'][1], self.bounds['sigma'][1], self.bounds['gamma'][1]],
+            [self.bounds['beta'][0], self.bounds['sigma'][0],
+             self.bounds['gamma'][0], self.bounds['omega'][0]],
+            [self.bounds['beta'][1], self.bounds['sigma'][1],
+             self.bounds['gamma'][1], self.bounds['omega'][1]],
         )
-        
+
         # Optimize
         result = optimize.least_squares(
             residuals,
@@ -223,11 +231,12 @@ class ParameterEstimator:
             loss='soft_l1',  # Robust to outliers
             verbose=0
         )
-        
+
         return EstimationResult(
             beta=result.x[0],
             sigma=result.x[1],
             gamma=result.x[2],
+            omega=result.x[3],
             loss=result.cost,
             success=result.success,
             message=result.message,
@@ -247,6 +256,8 @@ class ParameterEstimator:
         S + E + I + R = N.  At each time step the observed counts are
         treated as a single multinomial draw of size N with category
         probabilities given by the simulated SEIR fractions.
+
+        Estimates 4 parameters: β, σ, γ, ω.
         """
 
         obs_fracs = self._normalize_data(observed_data, N)
@@ -254,10 +265,10 @@ class ParameterEstimator:
 
         def neg_log_likelihood(params):
             """Multinomial negative log-likelihood for SEIR compartments."""
-            beta, sigma, gamma = params
+            beta, sigma, gamma, omega = params
 
             seir_params = SEIRParameters(
-                beta=beta, sigma=sigma, gamma=gamma, omega=0.01,
+                beta=beta, sigma=sigma, gamma=gamma, omega=omega,
                 fomo_enabled=fgi_values is not None
             )
             model = NetworkSEIR(seir_params)
@@ -282,10 +293,13 @@ class ParameterEstimator:
                 nll -= np.sum(obs_counts * np.log(sim_row + eps))
 
             return nll
-        
-        x0 = [initial_guess['beta'], initial_guess['sigma'], initial_guess['gamma']]
-        bounds = [self.bounds['beta'], self.bounds['sigma'], self.bounds['gamma']]
-        
+
+        omega_init = initial_guess.get('omega', 0.01)
+        x0 = [initial_guess['beta'], initial_guess['sigma'],
+              initial_guess['gamma'], omega_init]
+        bounds = [self.bounds['beta'], self.bounds['sigma'],
+                  self.bounds['gamma'], self.bounds['omega']]
+
         result = optimize.minimize(
             neg_log_likelihood,
             x0,
@@ -293,11 +307,12 @@ class ParameterEstimator:
             bounds=bounds,
             options={'maxiter': 1000}
         )
-        
+
         return EstimationResult(
             beta=result.x[0],
             sigma=result.x[1],
             gamma=result.x[2],
+            omega=result.x[3],
             loss=result.fun,
             success=result.success,
             message=result.message if hasattr(result, 'message') else "",
@@ -330,6 +345,7 @@ class ParameterEstimator:
         bootstrap_betas: List[float] = []
         bootstrap_sigmas: List[float] = []
         bootstrap_gammas: List[float] = []
+        bootstrap_omegas: List[float] = []
 
         bs = StationaryBootstrap(
             block_length, np.arange(t_max), seed=self.random_seed
@@ -348,6 +364,7 @@ class ParameterEstimator:
                 'beta': result.beta,
                 'sigma': result.sigma,
                 'gamma': result.gamma,
+                'omega': result.omega,
             }
 
             try:
@@ -358,6 +375,7 @@ class ParameterEstimator:
                     bootstrap_betas.append(boot_result.beta)
                     bootstrap_sigmas.append(boot_result.sigma)
                     bootstrap_gammas.append(boot_result.gamma)
+                    bootstrap_omegas.append(boot_result.omega)
             except Exception:
                 continue
 
@@ -374,6 +392,10 @@ class ParameterEstimator:
             result.gamma_ci = (
                 float(np.percentile(bootstrap_gammas, 2.5)),
                 float(np.percentile(bootstrap_gammas, 97.5))
+            )
+            result.omega_ci = (
+                float(np.percentile(bootstrap_omegas, 2.5)),
+                float(np.percentile(bootstrap_omegas, 97.5))
             )
 
         return result
@@ -408,7 +430,7 @@ class ParameterEstimator:
         
         # AIC and BIC
         n = t_max * 4  # 4 compartments
-        k = 3  # 3 parameters
+        k = 4  # 4 parameters (beta, sigma, gamma, omega)
         
         if result.loss > 0:
             # Assuming loss is sum of squared residuals

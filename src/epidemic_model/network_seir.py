@@ -449,7 +449,9 @@ class NetworkSEIR:
         self,
         state_df: pd.DataFrame,
         window_size: int = 7,
-        method: str = 'ratio'
+        method: str = 'ratio',
+        serial_interval_mean: float = 7.0,
+        serial_interval_std: float = 3.5
     ) -> pd.DataFrame:
         """
         Estimate time-varying reproduction number R(t).
@@ -459,12 +461,127 @@ class NetworkSEIR:
             window_size: Rolling window size for estimation
             method: Estimation method:
                 - 'ratio': Simple ratio method (new infections / current infections)
+                - 'cori': Cori et al. (2013) method via epyestim (falls back to ratio)
+            serial_interval_mean: Mean serial interval for Cori method (days)
+            serial_interval_std: Std dev of serial interval for Cori method (days)
 
         Returns:
             DataFrame with columns [t, R_t, R_t_lower, R_t_upper]
         """
-        self.logger.info(f"Computing time-varying R₀ using {method} method...")
+        self.logger.info(f"Computing time-varying R(t) using {method} method...")
 
+        if method == 'cori':
+            cori_result = self._compute_rt_cori(
+                state_df, serial_interval_mean, serial_interval_std
+            )
+            if cori_result is not None:
+                return cori_result
+            self.logger.info("Cori method unavailable, falling back to ratio method")
+
+        return self._compute_rt_ratio(state_df, window_size)
+
+    def _compute_rt_cori(
+        self,
+        state_df: pd.DataFrame,
+        serial_interval_mean: float = 7.0,
+        serial_interval_std: float = 3.5
+    ) -> Optional[pd.DataFrame]:
+        """
+        Estimate R(t) using Cori et al. (2013) method via epyestim.
+
+        Args:
+            state_df: DataFrame with SEIR state counts over time
+            serial_interval_mean: Mean serial interval (days)
+            serial_interval_std: Std dev of serial interval (days)
+
+        Returns:
+            DataFrame with R(t) estimates, or None if epyestim is unavailable
+        """
+        try:
+            from epyestim import estimate_r
+        except ImportError:
+            self.logger.warning(
+                "epyestim not installed; Cori R(t) method unavailable. "
+                "Install with: pip install epyestim"
+            )
+            return None
+
+        # Extract incidence (new infections per time step)
+        if 'I' in state_df.columns:
+            I = np.asarray(state_df['I'].values, dtype=float)
+        elif 'I_frac' in state_df.columns:
+            N_assumed = 10000
+            I = np.asarray(state_df['I_frac'].values, dtype=float) * N_assumed
+        else:
+            self.logger.error("Cannot find infection data in state_df")
+            return None
+
+        # Compute incidence as change in infected count, clipped to non-negative
+        incidence = np.diff(I)
+        incidence = np.maximum(incidence, 0)
+
+        if incidence.sum() <= 0:
+            self.logger.warning("No incidence detected; cannot estimate R(t) via Cori method")
+            return None
+
+        # epyestim expects a pandas Series with DatetimeIndex
+        t_col = np.asarray(state_df['t'].values) if 't' in state_df.columns else np.arange(len(state_df))
+        dates = pd.date_range(start='2020-01-01', periods=len(incidence), freq='D')
+        incidence_series = pd.Series(incidence, index=dates, name='cases')
+
+        try:
+            rt_result = estimate_r(
+                incidence_series,
+                si_distr=None,
+                mean_si=serial_interval_mean,
+                std_si=serial_interval_std,
+            )
+
+            # Build output DataFrame consistent with ratio method format
+            result_df = pd.DataFrame({
+                't': t_col[1:len(rt_result) + 1] if len(t_col) > len(rt_result) else np.arange(len(rt_result)),
+                'R_t': rt_result['R_mean'].values if 'R_mean' in rt_result.columns else rt_result.iloc[:, 0].values,
+            })
+
+            # Add CI columns if available
+            if 'R_q0.025' in rt_result.columns:
+                result_df['R_t_lower'] = rt_result['R_q0.025'].values
+            elif 'Q0.025' in rt_result.columns:
+                result_df['R_t_lower'] = rt_result['Q0.025'].values
+
+            if 'R_q0.975' in rt_result.columns:
+                result_df['R_t_upper'] = rt_result['R_q0.975'].values
+            elif 'Q0.975' in rt_result.columns:
+                result_df['R_t_upper'] = rt_result['Q0.975'].values
+
+            valid_rt = result_df['R_t'].dropna()
+            if len(valid_rt) > 0:
+                self.logger.info(
+                    f"Cori R(t) range: [{valid_rt.min():.2f}, {valid_rt.max():.2f}], "
+                    f"mean: {valid_rt.mean():.2f}"
+                )
+
+            return result_df
+
+        except Exception as e:
+            self.logger.warning(f"Cori R(t) estimation failed: {e}")
+            return None
+
+    def _compute_rt_ratio(
+        self,
+        state_df: pd.DataFrame,
+        window_size: int = 7
+    ) -> pd.DataFrame:
+        """
+        Estimate R(t) using simple ratio method.
+
+        Args:
+            state_df: DataFrame with SEIR state counts over time
+            window_size: Rolling window size for estimation
+
+        Returns:
+            DataFrame with columns [t, R_t, R_t_adjusted, R_t_lower, R_t_upper, ...]
+        """
         results = []
 
         # Extract data
@@ -487,71 +604,70 @@ class NetworkSEIR:
         new_infections = np.diff(E + I)
         new_infections = np.maximum(new_infections, 0)  # Can't be negative
 
-        if method == 'ratio':
-            # Simple ratio method
-            for i in range(window_size, len(state_df)):
-                window_start = i - window_size
+        # Simple ratio method
+        for i in range(window_size, len(state_df)):
+            window_start = i - window_size
 
-                # Current infected in window
-                I_window = I[window_start:i]
-                I_mean = np.mean(I_window)
+            # Current infected in window
+            I_window = I[window_start:i]
+            I_mean = np.mean(I_window)
 
-                # New infections in window
-                if i <= len(new_infections):
-                    new_inf_window = new_infections[window_start:min(i, len(new_infections))]
-                    new_inf_sum = np.sum(new_inf_window)
+            # New infections in window
+            if i <= len(new_infections):
+                new_inf_window = new_infections[window_start:min(i, len(new_infections))]
+                new_inf_sum = np.sum(new_inf_window)
+            else:
+                new_inf_sum = 0
+
+            # Susceptible fraction for adjustment
+            S_frac = S[i] / (S[i] + E[i] + I[i] + 1e-10)
+
+            if I_mean > 0 and S_frac > 0:
+                # R_t ~ (new infections per time) / (gamma * I) * (N / S)
+                # Simplified: R_t ~ (new_inf / I) * (1 / S_frac)
+                R_t = (new_inf_sum / window_size) / (self.params.gamma * I_mean)
+                # Adjust for susceptible depletion
+                R_t_adjusted = R_t / S_frac if S_frac > 0.1 else R_t
+            else:
+                R_t = np.nan
+                R_t_adjusted = np.nan
+
+            # Bootstrap CI - align arrays before bootstrapping
+            if I_mean > 0 and len(I_window) > 0 and len(new_inf_window) > 0:
+                # Align arrays to the same length to avoid index bias
+                min_len = min(len(I_window), len(new_inf_window))
+                if min_len < 2:
+                    R_t_lower = R_t_upper = R_t
                 else:
-                    new_inf_sum = 0
+                    I_aligned = I_window[:min_len]
+                    new_inf_aligned = new_inf_window[:min_len]
 
-                # Susceptible fraction for adjustment
-                S_frac = S[i] / (S[i] + E[i] + I[i] + 1e-10)
+                    R_t_samples = []
+                    for _ in range(100):
+                        boot_idx = self.rng.choice(min_len, min_len, replace=True)
+                        boot_I = np.mean(I_aligned[boot_idx])
+                        boot_new = np.sum(new_inf_aligned[boot_idx])
+                        if boot_I > 0:
+                            R_t_samples.append((boot_new / window_size) / (self.params.gamma * boot_I))
 
-                if I_mean > 0 and S_frac > 0:
-                    # R_t ≈ (new infections per time) / (gamma * I) * (N / S)
-                    # Simplified: R_t ≈ (new_inf / I) * (1 / S_frac)
-                    R_t = (new_inf_sum / window_size) / (self.params.gamma * I_mean)
-                    # Adjust for susceptible depletion
-                    R_t_adjusted = R_t / S_frac if S_frac > 0.1 else R_t
-                else:
-                    R_t = np.nan
-                    R_t_adjusted = np.nan
-
-                # Bootstrap CI - align arrays before bootstrapping
-                if I_mean > 0 and len(I_window) > 0 and len(new_inf_window) > 0:
-                    # Align arrays to the same length to avoid index bias
-                    min_len = min(len(I_window), len(new_inf_window))
-                    if min_len < 2:
-                        R_t_lower = R_t_upper = R_t
+                    if R_t_samples:
+                        R_t_lower = np.percentile(R_t_samples, 2.5)
+                        R_t_upper = np.percentile(R_t_samples, 97.5)
                     else:
-                        I_aligned = I_window[:min_len]
-                        new_inf_aligned = new_inf_window[:min_len]
+                        R_t_lower = R_t_upper = R_t
+            else:
+                R_t_lower = R_t_upper = np.nan
 
-                        R_t_samples = []
-                        for _ in range(100):
-                            boot_idx = self.rng.choice(min_len, min_len, replace=True)
-                            boot_I = np.mean(I_aligned[boot_idx])
-                            boot_new = np.sum(new_inf_aligned[boot_idx])
-                            if boot_I > 0:
-                                R_t_samples.append((boot_new / window_size) / (self.params.gamma * boot_I))
-
-                        if R_t_samples:
-                            R_t_lower = np.percentile(R_t_samples, 2.5)
-                            R_t_upper = np.percentile(R_t_samples, 97.5)
-                        else:
-                            R_t_lower = R_t_upper = R_t
-                else:
-                    R_t_lower = R_t_upper = np.nan
-
-                results.append({
-                    't': t[i],
-                    'R_t': R_t,
-                    'R_t_adjusted': R_t_adjusted,
-                    'R_t_lower': R_t_lower,
-                    'R_t_upper': R_t_upper,
-                    'I': I[i],
-                    'S_frac': S_frac,
-                    'new_infections': new_inf_sum / window_size
-                })
+            results.append({
+                't': t[i],
+                'R_t': R_t,
+                'R_t_adjusted': R_t_adjusted,
+                'R_t_lower': R_t_lower,
+                'R_t_upper': R_t_upper,
+                'I': I[i],
+                'S_frac': S_frac,
+                'new_infections': new_inf_sum / window_size
+            })
 
         df = pd.DataFrame(results)
 
