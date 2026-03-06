@@ -95,6 +95,7 @@ seir_model:
   omega_init: 0.01  # Immunity waning rate
   fomo_amplification: true  # Enable FOMO factor based on Fear & Greed
   fomo_alpha: 1.0  # FOMO factor sensitivity
+  fomo_k: 2.0  # Sigmoid steepness for FOMO coupling
   
   # Parameter bounds for estimation
   bounds:

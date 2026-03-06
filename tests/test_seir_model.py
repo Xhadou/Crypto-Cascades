@@ -58,21 +58,26 @@ class TestSEIRParameters:
         assert params.r0() == pytest.approx(3.0, rel=1e-6)
     
     def test_effective_beta_neutral_fgi(self):
-        """Test effective beta at neutral FGI (50)."""
+        """Test effective beta at neutral FGI (50) -- sigmoid midpoint."""
         params = SEIRParameters(beta=0.3, fomo_alpha=1.0)
-        assert params.effective_beta(50) == pytest.approx(0.3, rel=1e-6)
-    
+        # At FGI=50: expit(0)=0.5, factor = 1 + 1.0*0.5 = 1.5, beta_eff = 0.45
+        assert params.effective_beta(50) == pytest.approx(0.3 * 1.5, rel=1e-6)
+
     def test_effective_beta_high_fgi(self):
-        """Test effective beta at high FGI (greed)."""
+        """Test effective beta at high FGI (greed) is amplified."""
         params = SEIRParameters(beta=0.3, fomo_alpha=1.0)
-        beta_eff = params.effective_beta(75)  # FGI=75 -> factor = 1.5
-        assert beta_eff == pytest.approx(0.45, rel=1e-6)
-    
+        beta_eff = params.effective_beta(75)
+        # With sigmoid, FGI=75 gives more than midpoint but less than linear
+        assert beta_eff > params.effective_beta(50)
+        assert beta_eff <= 0.99  # bounded
+
     def test_effective_beta_low_fgi(self):
-        """Test effective beta at low FGI (fear)."""
+        """Test effective beta at low FGI (fear) is reduced."""
         params = SEIRParameters(beta=0.3, fomo_alpha=1.0)
-        beta_eff = params.effective_beta(25)  # FGI=25 -> factor = 0.5
-        assert beta_eff == pytest.approx(0.15, rel=1e-6)
+        beta_eff = params.effective_beta(25)
+        # With sigmoid, FGI=25 gives less than midpoint
+        assert beta_eff < params.effective_beta(50)
+        assert beta_eff > 0  # always positive
     
     def test_effective_beta_fomo_disabled(self):
         """Test effective beta when FOMO is disabled."""
@@ -309,6 +314,60 @@ class TestMonteCarloSimulations:
             # Allow some tolerance for edge cases
             assert np.all(mean >= q05 - 0.1)
             assert np.all(mean <= q95 + 0.1)
+
+
+class TestSigmoidalFOMO:
+    """Tests for sigmoidal FOMO coupling (replaces linear coupling)."""
+
+    def test_fomo_is_bounded(self):
+        """Effective beta should never exceed 0.99."""
+        params = SEIRParameters(beta=0.5, fomo_alpha=3.0)
+        beta_eff = params.effective_beta(100.0)
+        assert beta_eff <= 0.99
+
+    def test_fomo_saturates_at_extremes(self):
+        """Sigmoid should produce diminishing returns at extreme FGI."""
+        params = SEIRParameters(beta=0.3, fomo_alpha=1.0)
+        b60 = params.effective_beta(60.0)
+        b80 = params.effective_beta(80.0)
+        b100 = params.effective_beta(100.0)
+        # Marginal increase should decrease (sigmoid saturation)
+        assert (b80 - b60) > (b100 - b80)
+
+    def test_fomo_symmetric_around_50(self):
+        """FGI=50 should give predictable amplification (sigmoid midpoint)."""
+        params = SEIRParameters(beta=0.3, fomo_alpha=1.0)
+        b50 = params.effective_beta(50.0)
+        # At midpoint, expit(0)=0.5, so factor = 1 + alpha*0.5 = 1.5
+        # beta_eff = 0.3 * 1.5 = 0.45
+        assert b50 == pytest.approx(0.3 * 1.5, rel=1e-6)
+
+    def test_fomo_disabled_returns_base_beta(self):
+        """With FOMO disabled, effective_beta should return base beta."""
+        params = SEIRParameters(beta=0.3, fomo_enabled=False)
+        assert params.effective_beta(100.0) == 0.3
+
+    def test_fomo_k_controls_steepness(self):
+        """Higher fomo_k should produce steeper sigmoid transition."""
+        params_gentle = SEIRParameters(beta=0.3, fomo_alpha=1.0, fomo_k=1.0)
+        params_steep = SEIRParameters(beta=0.3, fomo_alpha=1.0, fomo_k=5.0)
+        # At FGI=70 (moderately above midpoint), steep should be closer to saturation
+        b_gentle = params_gentle.effective_beta(70.0)
+        b_steep = params_steep.effective_beta(70.0)
+        assert b_steep > b_gentle
+
+    def test_fomo_low_fgi_reduces_beta(self):
+        """Low FGI (fear) should produce beta below the midpoint value."""
+        params = SEIRParameters(beta=0.3, fomo_alpha=1.0)
+        b20 = params.effective_beta(20.0)
+        b50 = params.effective_beta(50.0)
+        assert b20 < b50
+
+    def test_fomo_never_negative(self):
+        """Effective beta should never go negative even at FGI=0."""
+        params = SEIRParameters(beta=0.3, fomo_alpha=2.0)
+        b0 = params.effective_beta(0.0)
+        assert b0 > 0
 
 
 class TestSolveIVP:

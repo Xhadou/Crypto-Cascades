@@ -11,7 +11,7 @@ Mathematical Model:
     dR/dt = γ × I - ω × R
 
 Where:
-    β_eff = β × (1 + α × (FGI - 50) / 50)  (FOMO factor)
+    β_eff = min(β × (1 + α × expit(k × (FGI - 50) / 50)), 0.99)  (sigmoidal FOMO)
     β = transmission rate
     σ = incubation rate (1/latent period)
     γ = recovery rate
@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 import networkx as nx
 from scipy.integrate import solve_ivp
+from scipy.special import expit
 from typing import Dict, List, Optional, Tuple, Union, Callable, Any, Literal, overload
 from dataclasses import dataclass
 from enum import Enum
@@ -42,6 +43,7 @@ class SEIRParameters:
     
     # FOMO amplification
     fomo_alpha: float = 1.0   # FOMO sensitivity
+    fomo_k: float = 2.0       # Sigmoid steepness parameter
     fomo_enabled: bool = True
     
     def __post_init__(self):
@@ -57,19 +59,27 @@ class SEIRParameters:
     
     def effective_beta(self, fgi_value: float) -> float:
         """
-        Compute effective transmission rate with FOMO factor.
-        
+        Compute effective transmission rate with sigmoidal FOMO amplification.
+
+        Uses sigmoid (logistic) function for bounded, saturating response:
+            β_eff = min(β × (1 + α × expit(k × (FGI - 50) / 50)), 0.99)
+
+        The sigmoid provides:
+        - Natural saturation at extreme FGI values (no unbounded growth)
+        - β_eff is always in (0, 0.99] (valid probability)
+        - Smooth, differentiable transition centered at FGI=50
+
         Args:
             fgi_value: Fear & Greed Index (0-100)
-            
+
         Returns:
-            Effective β with FOMO amplification
+            Effective β with FOMO amplification, clamped to [0, 0.99]
         """
         if not self.fomo_enabled:
             return self.beta
-            
-        fomo_factor = 1.0 + self.fomo_alpha * (fgi_value - 50) / 50
-        return self.beta * max(0.1, fomo_factor)  # Ensure positive
+
+        fomo_factor = 1.0 + self.fomo_alpha * expit(self.fomo_k * (fgi_value - 50) / 50)
+        return min(self.beta * fomo_factor, 0.99)
 
 
 class NetworkSEIR:
