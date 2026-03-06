@@ -409,5 +409,59 @@ class TestReset:
         assert len(assigner.state_history) == 0
 
 
+class TestZScoreInfection:
+    """Tests for z-score based infection threshold."""
+
+    def test_small_net_positive_not_infected(self):
+        """Tiny net positive flow should NOT trigger infection via z-score."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # z = (0.6 - 0.5) / 0.3 = 0.33 < 1.5 -> not infected
+        assert not sa._is_buying_zscore(0.6, wallet_mean=0.5, wallet_std=0.3)
+
+    def test_large_net_positive_is_infected(self):
+        """Large net positive flow SHOULD trigger infection via z-score."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # z = (2.0 - 0.5) / 0.3 = 5.0 > 1.5 -> infected
+        assert sa._is_buying_zscore(2.0, wallet_mean=0.5, wallet_std=0.3)
+
+    def test_zero_std_falls_back(self):
+        """Zero std should fall back to simple threshold."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # With zero std, should use fallback (net_flow > infected_threshold)
+        # Default infected_threshold=0.0, so 0.1 > 0.0 -> True
+        assert sa._is_buying_zscore(0.1, wallet_mean=0.0, wallet_std=0.0)
+
+    def test_zero_std_negative_flow_not_infected(self):
+        """Zero std with negative flow should not trigger infection."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # Fallback: -0.5 > 0.0 -> False
+        assert not sa._is_buying_zscore(-0.5, wallet_mean=0.0, wallet_std=0.0)
+
+    def test_near_zero_std_falls_back(self):
+        """Near-zero std (below epsilon) should fall back to simple threshold."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # std < 1e-10, so fallback applies
+        assert sa._is_buying_zscore(0.5, wallet_mean=0.0, wallet_std=1e-12)
+
+    def test_exact_threshold_not_infected(self):
+        """Z-score exactly at threshold should NOT trigger infection (strict >)."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # z = (0.95 - 0.5) / 0.3 = 1.5 exactly -> not infected (> not >=)
+        assert not sa._is_buying_zscore(0.95, wallet_mean=0.5, wallet_std=0.3)
+
+    def test_custom_z_threshold(self):
+        """Custom z-threshold should be respected."""
+        sa = StateAssigner(infected_z_threshold=2.0)
+        # z = (1.0 - 0.5) / 0.25 = 2.0 exactly -> not infected (strict >)
+        assert not sa._is_buying_zscore(1.0, wallet_mean=0.5, wallet_std=0.25)
+        # z = (1.5 - 0.5) / 0.25 = 4.0 > 2.0 -> infected
+        assert sa._is_buying_zscore(1.5, wallet_mean=0.5, wallet_std=0.25)
+
+    def test_default_z_threshold(self):
+        """Default z-threshold should be 1.5."""
+        sa = StateAssigner()
+        assert sa.infected_z_threshold == 1.5
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

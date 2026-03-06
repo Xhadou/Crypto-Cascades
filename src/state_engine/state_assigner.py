@@ -78,7 +78,8 @@ class StateAssigner:
         infected_threshold: float = 0.0,
         recovery_window_days: int = 3,
         immunity_waning_days: int = 30,
-        min_usd_value: float = 100.0
+        min_usd_value: float = 100.0,
+        infected_z_threshold: float = 1.5
     ):
         """
         Initialize state assigner.
@@ -86,10 +87,14 @@ class StateAssigner:
         Args:
             susceptible_window_days: Days without buying to be susceptible
             exposure_window_hours: Hours after contact to be exposed
-            infected_threshold: Minimum net BTC to be infected (positive = buying)
+            infected_threshold: Minimum net BTC to be infected (positive = buying).
+                Used as fallback when wallet history is unavailable or has zero variance.
             recovery_window_days: Days of dormancy after infection before recovered
             immunity_waning_days: Days in recovered state before becoming susceptible again
             min_usd_value: Minimum USD transaction value to count
+            infected_z_threshold: Z-score threshold for infection classification.
+                A wallet is classified as infected when its net flow z-score
+                exceeds this value relative to its own transaction history.
         """
         self.susceptible_window = timedelta(days=susceptible_window_days)
         self.exposure_window = timedelta(hours=exposure_window_hours)
@@ -97,6 +102,7 @@ class StateAssigner:
         self.recovery_window = timedelta(days=recovery_window_days)
         self.immunity_waning_window = timedelta(days=immunity_waning_days)
         self.min_usd_value = min_usd_value
+        self.infected_z_threshold = infected_z_threshold
         
         # State tracking
         self.wallet_states: Dict[int, State] = {}
@@ -203,6 +209,36 @@ class StateAssigner:
             flows, wallet_id, current_date, window_days
         )
         return net_flow > self.infected_threshold
+
+    def _is_buying_zscore(
+        self,
+        net_flow: float,
+        wallet_mean: float,
+        wallet_std: float
+    ) -> bool:
+        """
+        Determine if buying behavior is unusually high using z-score.
+
+        Compares the current net flow against the wallet's own transaction
+        history. If the z-score exceeds infected_z_threshold, the wallet
+        is classified as exhibiting abnormal buying (FOMO) behavior.
+
+        Falls back to the simple infected_threshold when the wallet has
+        no history or constant flow (zero/near-zero standard deviation).
+
+        Args:
+            net_flow: Current period net BTC flow for the wallet.
+            wallet_mean: Historical mean net BTC flow for the wallet.
+            wallet_std: Historical standard deviation of net BTC flow.
+
+        Returns:
+            True if buying behavior is unusually high, False otherwise.
+        """
+        if wallet_std < 1e-10:
+            # No variance in history — fall back to simple threshold
+            return net_flow > self.infected_threshold
+        z = (net_flow - wallet_mean) / wallet_std
+        return z > self.infected_z_threshold
         
     def assign_states_at_time(
         self,

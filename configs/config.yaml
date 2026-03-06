@@ -81,7 +81,8 @@ state_assignment:
   exposed:
     contact_window_hours: 24  # Time window after contact with infected
   infected:
-    net_positive_threshold: 0.0  # Net BTC flow > threshold = buying
+    net_positive_threshold: 0.0  # Net BTC flow > threshold = buying (fallback)
+    z_threshold: 1.5  # Z-score threshold: infection when wallet's net flow z-score exceeds this
     min_usd_value: 100  # Minimum USD value to count as significant
   recovered:
     dormancy_window_days: 3  # Days without activity after being infected
