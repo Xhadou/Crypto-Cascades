@@ -415,11 +415,11 @@ class HypothesisTester:
             I_seir = seir_sim['I_frac'].values[:len(t)]
             seir_residuals = I_obs - I_seir
             seir_sse = np.sum(seir_residuals**2)
-            seir_aic = self._compute_aic(seir_sse, n_params=3, n_obs=len(t))
+            seir_aic = self._compute_aic(seir_sse, n_params=4, n_obs=len(t))
             model_results['SEIR'] = {
                 'sse': seir_sse,
                 'aic': seir_aic,
-                'n_params': 3,
+                'n_params': 4,
                 'fitted': I_seir
             }
             fitting_diagnostics['SEIR'] = {'status': 'success', 'sse': float(seir_sse)}
@@ -1097,6 +1097,16 @@ class HypothesisTester:
                 additional_metrics={'reason': 'insufficient_data', 'n_nodes_with_data': len(nodes)}
             )
 
+        # Normalize infection times to numeric (seconds from earliest)
+        # StateAssigner produces datetime objects; tests may use numeric values
+        raw_values = list(infection_times.values())
+        if raw_values and hasattr(raw_values[0], 'timestamp'):
+            min_time = min(raw_values)
+            infection_times = {
+                k: (v - min_time).total_seconds()
+                for k, v in infection_times.items()
+            }
+
         # Split into high/low centrality groups
         centrality_values = [centrality.get(n, 0) for n in nodes]
         median_centrality = np.median(centrality_values)
@@ -1106,13 +1116,13 @@ class HypothesisTester:
 
         for node in nodes:
             c = centrality.get(node, 0)
-            t = infection_times.get(node, np.nan)
-
-            if not np.isnan(t):
-                if c >= median_centrality:
-                    high_centrality_times.append(t)
-                else:
-                    low_centrality_times.append(t)
+            if node not in infection_times:
+                continue
+            t = infection_times[node]
+            if c >= median_centrality:
+                high_centrality_times.append(t)
+            else:
+                low_centrality_times.append(t)
 
         # Mann-Whitney U test (non-parametric)
         if len(high_centrality_times) > 5 and len(low_centrality_times) > 5:
