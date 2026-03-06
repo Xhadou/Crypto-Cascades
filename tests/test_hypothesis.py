@@ -382,5 +382,93 @@ class TestVuongTest:
         assert 'seir_r_squared' in result.additional_metrics
 
 
+class TestH3OneTailed:
+    """Tests for H3 one-tailed p-value fix."""
+
+    def test_h3_uses_one_tailed_p(self):
+        """H3 should use one-tailed p-value, not two-tailed with direction check."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        np.random.seed(42)
+        fgi = np.linspace(30, 80, 50)
+        infections = fgi * 0.5 + np.random.normal(0, 2, 50)
+
+        state_history = pd.DataFrame({
+            't': range(50),
+            'I': infections
+        })
+
+        result = tester.test_h3_fgi_correlation(state_history, fgi)
+        assert result.additional_metrics.get('one_tailed', False)
+
+    def test_h3_one_tailed_p_smaller_for_positive_corr(self):
+        """One-tailed p should be half of two-tailed when correlation is positive."""
+        from scipy.stats import spearmanr
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        np.random.seed(42)
+        fgi = np.linspace(30, 80, 50)
+        infections = fgi * 0.5 + np.random.normal(0, 2, 50)
+
+        state_history = pd.DataFrame({
+            't': range(50),
+            'I': infections
+        })
+
+        result = tester.test_h3_fgi_correlation(state_history, fgi)
+        # For positive correlation, one-tailed p = two-tailed p / 2
+        # So it should be less than or equal to the two-tailed p
+        two_tailed_p = result.additional_metrics.get('two_tailed_p_value')
+        assert two_tailed_p is not None
+        assert result.p_value <= two_tailed_p
+
+    def test_h3_negative_corr_not_significant(self):
+        """Negative correlation should not be significant for one-tailed test."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        np.random.seed(42)
+        fgi = np.linspace(30, 80, 50)
+        infections = -fgi * 0.5 + np.random.normal(0, 2, 50)  # Negative correlation
+
+        state_history = pd.DataFrame({
+            't': range(50),
+            'I': infections
+        })
+
+        result = tester.test_h3_fgi_correlation(state_history, fgi)
+        # One-tailed p for wrong direction should be > 0.5
+        assert result.p_value > 0.5
+        assert not result.reject_null
+
+
+class TestH5Permutation:
+    """Tests for H5 permutation test fix."""
+
+    def test_h5_uses_permutation_test(self):
+        """H5 should use network permutation, not just chi-square."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+
+        # Create graph with clear community structure
+        G1 = nx.complete_graph(50)
+        G2 = nx.complete_graph(50)
+        G = nx.disjoint_union(G1, G2)
+        G.add_edge(0, 50)
+        G.add_edge(25, 75)
+
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+
+        result = tester.test_h5_community_clustering(G, state_history)
+        assert 'permutation_p_value' in result.additional_metrics
+
+    def test_h5_permutation_p_used_for_rejection(self):
+        """H5 rejection should be based on permutation p-value."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+
+        result = tester.test_h5_community_clustering(G, state_history)
+        perm_p = result.additional_metrics['permutation_p_value']
+        # The main p_value should be the permutation p-value
+        assert result.p_value == perm_p
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

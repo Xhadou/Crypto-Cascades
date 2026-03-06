@@ -937,9 +937,16 @@ class HypothesisTester:
         else:
             corr, p_value = 0.0, 1.0
         
+        # One-tailed test: we hypothesize positive correlation (higher FGI → more infections)
+        two_tailed_p = float(p_value)
+        if corr > 0:
+            p_value_onetail = two_tailed_p / 2
+        else:
+            p_value_onetail = 1 - two_tailed_p / 2
+
         # Effect size (correlation is already standardized)
         effect_size = abs(corr)
-        
+
         # Fisher's z transformation for CI
         n = len(fgi_aligned)
         if abs(corr) < 1:
@@ -949,22 +956,22 @@ class HypothesisTester:
             ci_upper = float(np.tanh(z + 1.96 * se))
         else:
             ci_lower, ci_upper = float(corr), float(corr)
-        
+
         # Compute infection trend safely
         infections_arr = np.asarray(infections, dtype=float)
         try:
             infection_trend = float(np.polyfit(range(len(infections_arr)), infections_arr, 1)[0])
         except Exception:
             infection_trend = 0.0
-        
+
         return HypothesisResult(
             hypothesis="H3",
             description="Fear & Greed Index correlates with FOMO transmission",
             test_statistic=float(corr),
-            p_value=float(p_value),
+            p_value=float(p_value_onetail),
             effect_size=float(effect_size),
             confidence_interval=(ci_lower, ci_upper),
-            reject_null=bool(p_value < self.alpha and corr > 0),
+            reject_null=bool(p_value_onetail < self.alpha and corr > 0),
             alpha=self.alpha,
             sample_size=n,
             additional_metrics={
@@ -975,6 +982,8 @@ class HypothesisTester:
                 'optimal_lag_days': best_lag,
                 'lag_analysis': lag_results,
                 'best_lag_correlation': float(best_corr),
+                'one_tailed': True,
+                'two_tailed_p_value': two_tailed_p,
             }
         )
     
@@ -1228,49 +1237,89 @@ class HypothesisTester:
         
         observed_within_frac = within_community / total_edges if total_edges > 0 else 0
         
-        # Chi-square test
-        expected_within = expected_within_frac * total_edges
-        expected_between = (1 - expected_within_frac) * total_edges
-        
-        if expected_within > 5 and expected_between > 5:
-            chi2, p_value = stats.chisquare(
-                [within_community, between_community],
-                [expected_within, expected_between]
-            )
-        else:
-            chi2, p_value = 0.0, 1.0
-        
+        # Permutation test: shuffle community labels and recompute within-fraction
+        n_permutations = 1000
+        perm_fracs = []
+        partition_values = list(partition.values())
+        partition_keys = list(partition.keys())
+        rng = np.random.default_rng(self.random_seed if hasattr(self, 'random_seed') else 42)
+        for _ in range(n_permutations):
+            shuffled_values = partition_values.copy()
+            rng.shuffle(shuffled_values)
+            shuffled_partition = dict(zip(partition_keys, shuffled_values))
+            w = 0
+            b = 0
+            if used_infection_data:
+                # Re-count using infection data with shuffled communities
+                if ('node' in state_history.columns and 'state' in state_history.columns):
+                    infection_events = state_history[
+                        state_history['state'].isin(['I', State.INFECTED.value if hasattr(State, 'INFECTED') else 'I'])
+                    ]
+                    if not infection_events.empty:
+                        infected_nodes = set(infection_events['node'].unique()) & set(G.nodes())
+                        for node in infected_nodes:
+                            comm_node = shuffled_partition.get(node, -1)
+                            if comm_node == -1:
+                                continue
+                            try:
+                                neighbors = set(G.neighbors(node))
+                                if G.is_directed():
+                                    neighbors.update(G.predecessors(node))
+                            except Exception:
+                                continue
+                            infected_neighbors = neighbors & infected_nodes
+                            for nbr in infected_neighbors:
+                                comm_nbr = shuffled_partition.get(nbr, -1)
+                                if comm_nbr == -1:
+                                    continue
+                                if comm_node == comm_nbr:
+                                    w += 1
+                                else:
+                                    b += 1
+            else:
+                for u, v in G.edges():
+                    comm_u = shuffled_partition.get(u, -1)
+                    comm_v = shuffled_partition.get(v, -1)
+                    if comm_u == comm_v and comm_u != -1:
+                        w += 1
+                    else:
+                        b += 1
+            total_perm = w + b
+            perm_fracs.append(w / max(total_perm, 1))
+
+        perm_p_value = float(np.mean([f >= observed_within_frac for f in perm_fracs]))
+
         # Effect size: ratio of observed to expected
         if expected_within_frac > 0:
             effect_size = (observed_within_frac - expected_within_frac) / expected_within_frac
         else:
             effect_size = 0.0
-        
+
         # Modularity as additional metric (already computed)
         modularity = modularity_val
-        
+
         # Bootstrap CI for within-community fraction
         n_bootstrap = 1000
         bootstrap_fracs = []
-        
+
         edges = list(G.edges())
         for _ in range(n_bootstrap):
             sample_edges = [edges[i] for i in np.random.choice(len(edges), size=len(edges), replace=True)]
-            within = sum(1 for u, v in sample_edges 
+            within = sum(1 for u, v in sample_edges
                         if node_to_community.get(u, -1) == node_to_community.get(v, -1))
             bootstrap_fracs.append(within / len(sample_edges))
-        
+
         ci_lower = np.percentile(bootstrap_fracs, 2.5)
         ci_upper = np.percentile(bootstrap_fracs, 97.5)
-        
+
         return HypothesisResult(
             hypothesis="H5",
             description="Community structure creates FOMO infection clusters",
-            test_statistic=float(chi2),
-            p_value=float(p_value),
+            test_statistic=float(observed_within_frac),
+            p_value=float(perm_p_value),
             effect_size=float(effect_size),
             confidence_interval=(float(ci_lower), float(ci_upper)),
-            reject_null=bool(p_value < self.alpha and observed_within_frac > expected_within_frac),
+            reject_null=bool(perm_p_value < self.alpha and observed_within_frac > expected_within_frac),
             alpha=self.alpha,
             sample_size=total_edges,
             additional_metrics={
@@ -1278,7 +1327,9 @@ class HypothesisTester:
                 'modularity': modularity,
                 'observed_within_frac': observed_within_frac,
                 'expected_within_frac': expected_within_frac,
-                'largest_community_size': max(community_sizes) if community_sizes else 0
+                'largest_community_size': max(community_sizes) if community_sizes else 0,
+                'permutation_p_value': perm_p_value,
+                'n_permutations': n_permutations,
             }
         )
     
