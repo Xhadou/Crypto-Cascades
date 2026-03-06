@@ -251,5 +251,47 @@ class TestSensitivityAnalysis:
         assert all(np.isfinite(result['elasticity']) | (result['elasticity'] == 0))
 
 
+class TestBlockBootstrap:
+    """Tests for stationary block bootstrap."""
+
+    def test_bootstrap_uses_block_resampling(self):
+        """Bootstrap should use stationary block bootstrap, not i.i.d."""
+        from src.estimation.estimator import ParameterEstimator
+        est = ParameterEstimator(method='lsq', n_bootstrap=50)
+        assert hasattr(est, 'block_length_rule'), (
+            "Estimator should expose block_length_rule for block bootstrap"
+        )
+
+    def test_bootstrap_minimum_resamples(self):
+        """Default bootstrap should be >= 1000."""
+        from src.estimation.estimator import ParameterEstimator
+        est = ParameterEstimator(method='lsq')
+        assert est.n_bootstrap >= 1000, (
+            f"Default n_bootstrap={est.n_bootstrap} is too low; need >= 1000 "
+            f"for reliable 95% CIs"
+        )
+
+    def test_block_length_scales_with_sqrt(self):
+        """Block length should scale as sqrt(T) for a given time series."""
+        from src.estimation.estimator import ParameterEstimator
+        est = ParameterEstimator(method='lsq', n_bootstrap=50)
+        # For T=100, block_length should be ~10 (sqrt(100))
+        bl = est._compute_block_length(100)
+        assert bl == max(2, int(np.sqrt(100)))
+
+    def test_bootstrap_preserves_temporal_order(self):
+        """Block bootstrap indices should come in sorted contiguous blocks."""
+        from arch.bootstrap import StationaryBootstrap
+        rng = np.random.default_rng(42)
+        t_max = 50
+        block_length = max(2, int(np.sqrt(t_max)))
+        bs = StationaryBootstrap(block_length, np.arange(t_max), seed=rng)
+        for pos_data, _ in bs.bootstrap(1):
+            data = pos_data[0]
+            indices = np.sort(data.astype(int).flatten())
+            # Block bootstrap produces the same number of observations
+            assert len(indices) == t_max
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

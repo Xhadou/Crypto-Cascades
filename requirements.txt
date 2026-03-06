@@ -12,6 +12,9 @@ powerlaw>=1.5  # Power-law fitting
 ndlib>=5.1.0  # Network Diffusion Library
 EoN>=1.1  # Epidemics on Networks
 
+# Statistical Inference
+arch>=7.0  # Stationary block bootstrap (Politis & Romano 1994)
+
 # Data Acquisition
 requests>=2.28.0
 pycoingecko>=3.1.0

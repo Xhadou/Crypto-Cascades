@@ -18,6 +18,8 @@ from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
 import logging
 
+from arch.bootstrap import StationaryBootstrap
+
 from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
 from src.utils.logger import get_logger
 
@@ -74,21 +76,25 @@ class ParameterEstimator:
     def __init__(
         self,
         method: str = 'lsq',
-        random_seed: int = 42
+        random_seed: int = 42,
+        n_bootstrap: int = 2000
     ):
         """
         Initialize the estimator.
-        
+
         Args:
             method: Estimation method ('lsq', 'mle', 'bayesian')
             random_seed: Random seed for reproducibility
+            n_bootstrap: Default number of bootstrap resamples for CIs
         """
         self.method = method
         self.random_seed = random_seed
+        self.n_bootstrap = n_bootstrap
+        self.block_length_rule = 'sqrt'  # block length = sqrt(T)
         np.random.seed(random_seed)
-        
+
         self.logger = get_logger(__name__)
-        
+
         # Parameter bounds
         self.bounds = {
             'beta': (0.01, 1.0),
@@ -96,27 +102,42 @@ class ParameterEstimator:
             'gamma': (0.01, 1.0),
         }
         
+    def _compute_block_length(self, t_max: int) -> int:
+        """Compute block length for stationary block bootstrap.
+
+        Uses sqrt(T) rule (Politis & Romano 1994).
+
+        Args:
+            t_max: Length of the time series.
+
+        Returns:
+            Block length (at least 2).
+        """
+        return max(2, int(np.sqrt(t_max)))
+
     def estimate(
         self,
         observed_data: pd.DataFrame,
         N: int,
         fgi_values: Optional[np.ndarray] = None,
         initial_guess: Optional[Dict[str, float]] = None,
-        n_bootstrap: int = 100
+        n_bootstrap: Optional[int] = None
     ) -> EstimationResult:
         """
         Estimate SEIR parameters from observed data.
-        
+
         Args:
             observed_data: DataFrame with columns [t, S, E, I, R] or fractions
             N: Total population
             fgi_values: Fear & Greed Index values
             initial_guess: Initial parameter values
-            n_bootstrap: Number of bootstrap samples for CI
-            
+            n_bootstrap: Number of bootstrap samples for CI (None = use instance default)
+
         Returns:
             EstimationResult with fitted parameters and uncertainty
         """
+        if n_bootstrap is None:
+            n_bootstrap = self.n_bootstrap
         self.logger.info(f"Estimating parameters using {self.method} method...")
         
         if initial_guess is None:
@@ -280,36 +301,55 @@ class ParameterEstimator:
         fgi_values: Optional[np.ndarray],
         n_bootstrap: int
     ) -> EstimationResult:
-        """Compute bootstrap confidence intervals."""
-        self.logger.info(f"Computing {n_bootstrap} bootstrap CIs...")
-        
+        """Compute bootstrap confidence intervals using stationary block bootstrap.
+
+        Uses the stationary block bootstrap of Politis & Romano (1994) to
+        preserve temporal autocorrelation in the SEIR time series.  Block
+        length is chosen as sqrt(T).
+        """
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
-        
-        bootstrap_betas = []
-        bootstrap_sigmas = []
-        bootstrap_gammas = []
-        
-        for i in range(n_bootstrap):
-            # Resample with replacement
-            indices = np.random.choice(t_max, size=t_max, replace=True)
-            indices.sort()
-            
+
+        block_length = self._compute_block_length(t_max)
+        self.logger.info(
+            f"Computing {n_bootstrap} block-bootstrap CIs "
+            f"(block_length={block_length}, T={t_max})..."
+        )
+
+        bootstrap_betas: List[float] = []
+        bootstrap_sigmas: List[float] = []
+        bootstrap_gammas: List[float] = []
+
+        bs = StationaryBootstrap(
+            block_length, np.arange(t_max), seed=self.random_seed
+        )
+
+        for pos_data, _ in bs.bootstrap(n_bootstrap):
+            data = pos_data[0]
+            indices = np.sort(data.astype(int).flatten())
+            # Clip to valid range
+            indices = np.clip(indices, 0, len(obs_fracs) - 1)
+
             bootstrap_df = obs_fracs.iloc[indices].reset_index(drop=True)
-            
-            # Re-estimate
-            initial = {'beta': result.beta, 'sigma': result.sigma, 'gamma': result.gamma}
-            
+
+            # Re-estimate from block-bootstrapped series
+            initial = {
+                'beta': result.beta,
+                'sigma': result.sigma,
+                'gamma': result.gamma,
+            }
+
             try:
-                boot_result = self._estimate_lsq(bootstrap_df, N, fgi_values, initial)
-                
+                boot_result = self._estimate_lsq(
+                    bootstrap_df, N, fgi_values, initial
+                )
                 if boot_result.success:
                     bootstrap_betas.append(boot_result.beta)
                     bootstrap_sigmas.append(boot_result.sigma)
                     bootstrap_gammas.append(boot_result.gamma)
             except Exception:
                 continue
-        
+
         # Compute 95% CIs
         if len(bootstrap_betas) >= 10:
             result.beta_ci = (
@@ -324,7 +364,7 @@ class ParameterEstimator:
                 float(np.percentile(bootstrap_gammas, 2.5)),
                 float(np.percentile(bootstrap_gammas, 97.5))
             )
-        
+
         return result
     
     def _compute_gof_metrics(
