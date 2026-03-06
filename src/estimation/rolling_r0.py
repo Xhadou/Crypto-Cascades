@@ -10,6 +10,7 @@ import pandas as pd
 from typing import Optional
 
 from src.estimation.estimator import ParameterEstimator
+from src.utils.exceptions import ConfigurationError, InsufficientDataError
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -51,13 +52,13 @@ def estimate_rolling_r0(
         to one successfully estimated window.
     """
     if window_days < 10:
-        raise ValueError(
+        raise ConfigurationError(
             f"window_days={window_days} is too small; need at least 10 "
             "data points for a meaningful SEIR fit."
         )
 
     if len(state_data) < window_days:
-        raise ValueError(
+        raise InsufficientDataError(
             f"state_data has {len(state_data)} rows but window_days="
             f"{window_days}; need at least window_days rows."
         )

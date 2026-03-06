@@ -969,6 +969,7 @@ class CryptoCascadesPipeline:
 
         # FGI correlation plot (requires real FGI + H3 results)
         if (not self._fgi_is_synthetic
+                and self._fgi_values is not None
                 and self._hypothesis_results is not None
                 and 'H3' in self._hypothesis_results):
             h3 = self._hypothesis_results['H3']
