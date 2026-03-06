@@ -80,10 +80,12 @@ state_assignment:
     no_buy_window_days: 7  # No incoming BTC in past N days
   exposed:
     contact_window_hours: 24  # Time window after contact with infected
+    timeout_days: 14  # Days in EXPOSED before reverting to SUSCEPTIBLE if no infection
   infected:
     net_positive_threshold: 0.0  # Net BTC flow > threshold = buying (fallback)
     z_threshold: 1.5  # Z-score threshold: infection when wallet's net flow z-score exceeds this
     min_usd_value: 100  # Minimum USD value to count as significant
+    spontaneous_rate: 0.001  # Probability per timestep of S->I without infected neighbor (importation)
   recovered:
     dormancy_window_days: 3  # Days without activity after being infected
     immunity_waning_days: 30  # Days in recovered state before becoming susceptible again

@@ -34,13 +34,13 @@ class State(Enum):
 
 
 # Valid state transitions in SEIR model
-# S can go to S (stay), E (exposure), or I (direct infection after exposure)
-# E can go to E (stay) or I (become infected)
+# S can go to S (stay), E (exposure), or I (direct infection after exposure / spontaneous)
+# E can go to E (stay), I (become infected), or S (exposure timeout)
 # I can go to I (stay) or R (recover)
 # R can go to R (stay) or S (immunity wanes)
 VALID_TRANSITIONS: Dict[State, Set[State]] = {
     State.SUSCEPTIBLE: {State.SUSCEPTIBLE, State.EXPOSED, State.INFECTED},
-    State.EXPOSED: {State.EXPOSED, State.INFECTED},
+    State.EXPOSED: {State.EXPOSED, State.INFECTED, State.SUSCEPTIBLE},
     State.INFECTED: {State.INFECTED, State.RECOVERED},
     State.RECOVERED: {State.RECOVERED, State.SUSCEPTIBLE},
 }
@@ -79,7 +79,9 @@ class StateAssigner:
         recovery_window_days: int = 3,
         immunity_waning_days: int = 30,
         min_usd_value: float = 100.0,
-        infected_z_threshold: float = 1.5
+        infected_z_threshold: float = 1.5,
+        exposure_timeout_days: int = 14,
+        spontaneous_infection_rate: float = 0.001
     ):
         """
         Initialize state assigner.
@@ -95,6 +97,13 @@ class StateAssigner:
             infected_z_threshold: Z-score threshold for infection classification.
                 A wallet is classified as infected when its net flow z-score
                 exceeds this value relative to its own transaction history.
+            exposure_timeout_days: Days in EXPOSED state before reverting to
+                SUSCEPTIBLE if no infection occurs. Models finite exposure
+                periods where the contagion opportunity expires.
+            spontaneous_infection_rate: Probability per timestep that a
+                SUSCEPTIBLE wallet buying BTC becomes INFECTED without
+                contact with an infected neighbor (importation from outside
+                the observed network). Range [0, 1].
         """
         self.susceptible_window = timedelta(days=susceptible_window_days)
         self.exposure_window = timedelta(hours=exposure_window_hours)
@@ -103,17 +112,23 @@ class StateAssigner:
         self.immunity_waning_window = timedelta(days=immunity_waning_days)
         self.min_usd_value = min_usd_value
         self.infected_z_threshold = infected_z_threshold
-        
+        self.exposure_timeout_days = exposure_timeout_days
+        self.spontaneous_infection_rate = spontaneous_infection_rate
+
+        # RNG for stochastic processes (spontaneous infection)
+        self.rng = np.random.default_rng(42)
+
         # State tracking
         self.wallet_states: Dict[int, State] = {}
         self.state_history: Dict[int, List[Tuple[datetime, State]]] = defaultdict(list)
         self.infection_times: Dict[int, datetime] = {}
         self.recovery_times: Dict[int, datetime] = {}
         self.last_buying_activity: Dict[int, datetime] = {}
+        self.exposure_start_times: Dict[int, datetime] = {}
         self._node_infection_times_df: pd.DataFrame = pd.DataFrame(
             columns=['node', 'infection_time']
         )
-        
+
         self.logger = get_logger(__name__)
         
     def reset(self) -> None:
@@ -123,6 +138,7 @@ class StateAssigner:
         self.infection_times = {}
         self.recovery_times = {}
         self.last_buying_activity = {}
+        self.exposure_start_times = {}
         self._node_infection_times_df = pd.DataFrame(
             columns=['node', 'infection_time']
         )
@@ -344,36 +360,55 @@ class StateAssigner:
 
         elif prev_state == State.EXPOSED:
             # E -> I: Start buying
+            # E -> S: Exposure timeout (no infection within timeout window)
             if is_buying:
                 self.infection_times[wallet] = current_time
                 self.last_buying_activity[wallet] = current_time
                 new_state = State.INFECTED
             else:
-                new_state = State.EXPOSED
+                exposure_start = self.exposure_start_times.get(wallet)
+                if (
+                    exposure_start
+                    and current_time
+                    and (current_time - exposure_start).days > self.exposure_timeout_days
+                ):
+                    new_state = State.SUSCEPTIBLE
+                    # Clear expired exposure tracking
+                    del self.exposure_start_times[wallet]
+                else:
+                    new_state = State.EXPOSED
 
         else:  # SUSCEPTIBLE
+            # S -> I: Spontaneous infection (importation from outside network)
             # S -> E: Contact with infected neighbor
             # S -> I: Direct infection (start buying after contact)
 
-            has_infected_neighbor = False
-            try:
-                neighbors = set(G.neighbors(wallet))
-                if G.is_directed():
-                    # For directed graph, also check predecessors (incoming edges)
-                    neighbors.update(G.predecessors(wallet))  # type: ignore[union-attr]
-                has_infected_neighbor = bool(neighbors & infected_wallets)
-            except (nx.NetworkXError, KeyError, ValueError):
-                pass
-
-            if has_infected_neighbor:
-                if is_buying:
-                    self.infection_times[wallet] = current_time
-                    self.last_buying_activity[wallet] = current_time
-                    new_state = State.INFECTED
-                else:
-                    new_state = State.EXPOSED
+            # Check for spontaneous infection first (external importation)
+            if is_buying and self.rng.random() < self.spontaneous_infection_rate:
+                self.infection_times[wallet] = current_time
+                self.last_buying_activity[wallet] = current_time
+                new_state = State.INFECTED
             else:
-                new_state = State.SUSCEPTIBLE
+                has_infected_neighbor = False
+                try:
+                    neighbors = set(G.neighbors(wallet))
+                    if G.is_directed():
+                        # For directed graph, also check predecessors (incoming edges)
+                        neighbors.update(G.predecessors(wallet))  # type: ignore[union-attr]
+                    has_infected_neighbor = bool(neighbors & infected_wallets)
+                except (nx.NetworkXError, KeyError, ValueError):
+                    pass
+
+                if has_infected_neighbor:
+                    if is_buying:
+                        self.infection_times[wallet] = current_time
+                        self.last_buying_activity[wallet] = current_time
+                        new_state = State.INFECTED
+                    else:
+                        self.exposure_start_times[wallet] = current_time
+                        new_state = State.EXPOSED
+                else:
+                    new_state = State.SUSCEPTIBLE
 
         # Validate the transition
         if not validate_transition(prev_state, new_state):
