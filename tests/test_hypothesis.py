@@ -498,6 +498,9 @@ class TestH6Permutation:
         assert result.additional_metrics['n_permutations'] >= 1000
 
 
+lifelines = pytest.importorskip("lifelines", reason="lifelines not installed")
+
+
 class TestH4Survival:
     """Tests for H4 Cox proportional hazards survival analysis."""
 
