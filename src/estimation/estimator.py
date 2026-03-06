@@ -6,7 +6,7 @@ using various optimization methods.
 
 Methods:
 1. Least Squares Fitting - Minimize sum of squared differences
-2. Maximum Likelihood Estimation - Poisson observation model
+2. Maximum Likelihood Estimation - Multinomial observation model
 3. Bayesian Inference - MCMC sampling with prior distributions
 """
 
@@ -241,35 +241,46 @@ class ParameterEstimator:
         fgi_values: Optional[np.ndarray],
         initial_guess: Dict[str, float]
     ) -> EstimationResult:
-        """Maximum likelihood estimation with Poisson observation model."""
-        
+        """Maximum likelihood estimation with multinomial observation model.
+
+        Uses a multinomial log-likelihood that respects the constraint
+        S + E + I + R = N.  At each time step the observed counts are
+        treated as a single multinomial draw of size N with category
+        probabilities given by the simulated SEIR fractions.
+        """
+
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
-        
+
         def neg_log_likelihood(params):
-            """Compute negative log-likelihood."""
+            """Multinomial negative log-likelihood for SEIR compartments."""
             beta, sigma, gamma = params
-            
+
             seir_params = SEIRParameters(
                 beta=beta, sigma=sigma, gamma=gamma, omega=0.01,
                 fomo_enabled=fgi_values is not None
             )
             model = NetworkSEIR(seir_params)
-            
+
             I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
             sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
-            
-            # Poisson log-likelihood
+
+            # Multinomial log-likelihood: sum_t sum_c obs_count_c(t) * log(sim_frac_c(t))
             eps = 1e-10
-            nll = 0
-            
-            for col in ['S', 'E', 'I', 'R']:
-                obs_counts = np.asarray(obs_fracs[f'{col}_frac'].values) * N
-                sim_counts = np.asarray(sim[f'{col}_frac'].values) * N + eps
-                
-                # Log-likelihood: sum(obs * log(sim) - sim)
-                nll -= np.sum(obs_counts * np.log(sim_counts) - sim_counts)
-            
+            nll = 0.0
+
+            for t_idx in range(t_max):
+                obs_row = np.array([
+                    obs_fracs[f'{c}_frac'].iloc[t_idx] for c in ['S', 'E', 'I', 'R']
+                ])
+                sim_row = np.array([
+                    sim[f'{c}_frac'].iloc[t_idx] for c in ['S', 'E', 'I', 'R']
+                ])
+                # Normalize simulated fractions to sum to 1
+                sim_row = sim_row / (sim_row.sum() + eps)
+                obs_counts = obs_row * N
+                nll -= np.sum(obs_counts * np.log(sim_row + eps))
+
             return nll
         
         x0 = [initial_guess['beta'], initial_guess['sigma'], initial_guess['gamma']]

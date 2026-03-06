@@ -293,5 +293,63 @@ class TestBlockBootstrap:
             assert len(indices) == t_max
 
 
+class TestMLEObservationModel:
+    """Tests for the MLE observation model (multinomial, not Poisson)."""
+
+    def test_mle_uses_multinomial_not_poisson(self):
+        """MLE should use multinomial, not independent Poisson."""
+        import inspect
+        est = ParameterEstimator(method='mle')
+        source = inspect.getsource(est._estimate_mle)
+        assert 'multinomial' in source.lower() or 'dirichlet' in source.lower(), (
+            "MLE method should reference multinomial (or Dirichlet) observation model"
+        )
+        assert 'poisson' not in source.lower(), (
+            "MLE method should not use independent Poisson observation model"
+        )
+
+    def test_multinomial_nll_normalizes_simulated_fractions(self):
+        """Simulated fractions should be normalized to sum to 1 in NLL."""
+        import inspect
+        est = ParameterEstimator(method='mle')
+        source = inspect.getsource(est._estimate_mle)
+        # The NLL must normalize sim_row so fractions sum to 1
+        assert 'sum()' in source or 'normalize' in source.lower(), (
+            "MLE NLL should normalize simulated fractions to enforce S+E+I+R=1"
+        )
+
+    def test_multinomial_nll_no_subtraction_of_sim_counts(self):
+        """Multinomial NLL should NOT subtract sim_counts (that's Poisson).
+
+        Poisson NLL = sum(obs*log(sim) - sim), the '- sim' term is wrong
+        for multinomial where NLL = -sum(obs_counts * log(sim_frac)).
+        """
+        import inspect
+        est = ParameterEstimator(method='mle')
+        source = inspect.getsource(est._estimate_mle)
+        # The Poisson-specific "- sim_counts" subtraction must be gone
+        assert '- sim_counts' not in source, (
+            "MLE NLL still contains '- sim_counts' term from Poisson model"
+        )
+
+    def test_mle_recovers_parameters_from_clean_data(self):
+        """MLE should recover true parameters from clean synthetic data."""
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=10000, initial_infected=10, t_max=100)
+
+        est = ParameterEstimator(method='mle', random_seed=42)
+        result = est.estimate(
+            data, N=10000,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+
+        assert result.success
+        assert result.beta == pytest.approx(0.3, rel=0.25)
+        assert result.sigma == pytest.approx(0.2, rel=0.25)
+        assert result.gamma == pytest.approx(0.1, rel=0.25)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
