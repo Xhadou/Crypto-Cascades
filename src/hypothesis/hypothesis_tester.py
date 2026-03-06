@@ -346,7 +346,6 @@ class HypothesisTester:
         self.logger.info("Testing H1: FOMO follows epidemic dynamics...")
 
         from scipy.optimize import curve_fit
-        from scipy.stats import chi2
 
         # Get observed infected fraction over time
         if observed_data is not None and 'I_frac' in observed_data.columns:
@@ -414,7 +413,7 @@ class HypothesisTester:
             I_exp = exponential(t, *popt)
             exp_sse = np.sum((I_obs - I_exp)**2)
             exp_aic = self._compute_aic(exp_sse, n_params=2, n_obs=len(t))
-            model_results['Exponential'] = {'sse': exp_sse, 'aic': exp_aic, 'n_params': 2}
+            model_results['Exponential'] = {'sse': exp_sse, 'aic': exp_aic, 'n_params': 2, 'fitted': I_exp}
             fitting_diagnostics['Exponential'] = {'status': 'success', 'sse': float(exp_sse)}
         except Exception as e:
             self.logger.warning(f"Exponential fitting failed: {e}")
@@ -432,7 +431,7 @@ class HypothesisTester:
             I_log = logistic(t, *popt)
             log_sse = np.sum((I_obs - I_log)**2)
             log_aic = self._compute_aic(log_sse, n_params=3, n_obs=len(t))
-            model_results['Logistic'] = {'sse': log_sse, 'aic': log_aic, 'n_params': 3}
+            model_results['Logistic'] = {'sse': log_sse, 'aic': log_aic, 'n_params': 3, 'fitted': I_log}
             fitting_diagnostics['Logistic'] = {'status': 'success', 'sse': float(log_sse)}
         except Exception as e:
             self.logger.warning(f"Logistic fitting failed: {e}")
@@ -448,7 +447,7 @@ class HypothesisTester:
             I_lin = linear(t, *popt)
             lin_sse = np.sum((I_obs - I_lin)**2)
             lin_aic = self._compute_aic(lin_sse, n_params=2, n_obs=len(t))
-            model_results['Linear'] = {'sse': lin_sse, 'aic': lin_aic, 'n_params': 2}
+            model_results['Linear'] = {'sse': lin_sse, 'aic': lin_aic, 'n_params': 2, 'fitted': I_lin}
             fitting_diagnostics['Linear'] = {'status': 'success', 'sse': float(lin_sse)}
         except Exception as e:
             self.logger.warning(f"Linear fitting failed: {e}")
@@ -484,28 +483,74 @@ class HypothesisTester:
 
         # Effect size: difference in AIC weights between SEIR and next best
         other_weights = [w for k, w in aic_weights.items() if k != 'SEIR']
-        effect_size = aic_weights.get('SEIR', 0) - max(other_weights) if other_weights else 0
+        aic_effect_size = aic_weights.get('SEIR', 0) - max(other_weights) if other_weights else 0
 
-        # P-value approximation using likelihood ratio test (SEIR vs best alternative)
-        if best_model != 'SEIR' and best_model in valid_models:
-            # Likelihood ratio statistic
-            lr_stat = len(t) * np.log(valid_models[best_model]['sse'] / valid_models['SEIR']['sse']) if valid_models['SEIR']['sse'] > 0 else 0
-            df_diff = abs(valid_models['SEIR']['n_params'] - valid_models[best_model]['n_params'])
-            if df_diff > 0 and lr_stat > 0:
-                p_value = 1 - chi2.cdf(abs(lr_stat), df_diff)
+        # --- Vuong test for non-nested model comparison ---
+        # Find the best non-SEIR model that has fitted values
+        non_seir_with_fitted = [
+            (name, info) for name, info in valid_models.items()
+            if name != 'SEIR' and 'fitted' in info
+        ]
+
+        eps = 1e-10
+        n_obs = len(I_obs)
+
+        if non_seir_with_fitted:
+            # Pick the best alternative (lowest AIC among non-SEIR)
+            alt_name, alt_info = min(non_seir_with_fitted, key=lambda x: x[1]['aic'])
+
+            # Per-observation squared residuals
+            seir_resid2 = (I_obs - valid_models['SEIR']['fitted'])**2
+            alt_resid2 = (I_obs - alt_info['fitted'])**2
+
+            # Per-observation log-likelihood ratio (Gaussian assumption)
+            # lr_i > 0 means SEIR fits observation i better
+            lr_i = 0.5 * (np.log(alt_resid2 + eps) - np.log(seir_resid2 + eps))
+
+            # Vuong test statistic: mean(lr_i) / (std(lr_i) / sqrt(n))
+            lr_std = np.std(lr_i, ddof=1)
+            if lr_std > eps:
+                vuong_stat = float(np.mean(lr_i) / (lr_std / np.sqrt(n_obs)))
             else:
-                p_value = 0.5 if seir_supported else 0.99
+                # If std is ~0, all observations agree; use sign of mean
+                vuong_stat = float(np.sign(np.mean(lr_i)) * 10.0)
+
+            # One-sided p-value: probability that SEIR is NOT better
+            p_value = float(1.0 - stats.norm.cdf(vuong_stat))
         else:
-            p_value = 0.01 if seir_supported else 0.5
+            # No alternative model with fitted values; fall back to AIC-based assessment
+            vuong_stat = float('nan')
+            # Use chi2 survival function on AIC difference as approximate p-value
+            p_value = float(np.exp(-0.5 * abs(seir_delta_aic))) if seir_delta_aic <= 0 else 0.5
+
+        # --- NRMSE-based confidence interval (replaces ad-hoc R^2 +/- 0.1) ---
+        seir_resid2 = (I_obs - valid_models['SEIR']['fitted'])**2
+        seir_rmse = np.sqrt(np.mean(seir_resid2))
+        obs_range = np.max(I_obs) - np.min(I_obs) + eps
+        nrmse = seir_rmse / obs_range
+
+        # Bootstrap NRMSE CI
+        nrmse_boots = []
+        rng = np.random.default_rng(self.random_seed)
+        for _ in range(500):
+            idx = rng.choice(n_obs, size=n_obs, replace=True)
+            boot_rmse = np.sqrt(np.mean(seir_resid2[idx]))
+            boot_nrmse = boot_rmse / obs_range
+            nrmse_boots.append(boot_nrmse)
+        ci_lo = float(np.percentile(nrmse_boots, 2.5))
+        ci_hi = float(np.percentile(nrmse_boots, 97.5))
+
+        # Use NRMSE as effect size (lower is better)
+        effect_size = float(nrmse)
 
         return HypothesisResult(
             hypothesis="H1",
             description="FOMO episodes follow SEIR epidemic dynamics (vs alternative models)",
             test_statistic=seir_aic,
             p_value=float(p_value),
-            effect_size=float(effect_size),
-            confidence_interval=(float(seir_r2 - 0.1), float(min(1.0, seir_r2 + 0.1))),
-            reject_null=bool(seir_supported),
+            effect_size=effect_size,
+            confidence_interval=(ci_lo, ci_hi),
+            reject_null=bool(seir_supported and p_value < self.alpha),
             alpha=self.alpha,
             sample_size=len(t),
             additional_metrics={
@@ -515,6 +560,10 @@ class HypothesisTester:
                 'best_model': best_model,
                 'seir_r_squared': seir_r2,
                 'seir_delta_aic': seir_delta_aic,
+                'vuong_statistic': float(vuong_stat) if not np.isnan(vuong_stat) else float('nan'),
+                'vuong_alternative': alt_name if non_seir_with_fitted else None,
+                'nrmse': float(nrmse),
+                'aic_weight_effect_size': float(aic_effect_size),
                 'fitting_diagnostics': fitting_diagnostics,
                 'data_quality': {
                     'n_observations': len(t),
@@ -522,7 +571,7 @@ class HypothesisTester:
                     'variance': float(np.var(I_obs)),
                     'range': (float(I_obs.min()), float(I_obs.max()))
                 },
-                'interpretation': f"SEIR {'is' if seir_supported else 'is NOT'} the best model (ΔAIC={seir_delta_aic:.2f})"
+                'interpretation': f"SEIR {'is' if seir_supported else 'is NOT'} the best model (ΔAIC={seir_delta_aic:.2f}, Vuong p={p_value:.4f})"
             }
         )
 

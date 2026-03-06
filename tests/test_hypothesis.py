@@ -235,5 +235,90 @@ class TestStatisticalValidity:
             assert result.reject_null == False
 
 
+class TestVuongTest:
+    """Tests for Vuong test replacing fabricated H1 p-value."""
+
+    def test_vuong_returns_real_p_value(self):
+        """H1 p-value should be computed, not hard-coded."""
+        from src.hypothesis.hypothesis_tester import HypothesisTester
+        from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
+        from src.estimation.estimator import EstimationResult
+
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        observed = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est_params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.85)
+        result = tester.test_h1_epidemic_dynamics(
+            state_history=observed,
+            estimated_params=est_params,
+            observed_data=observed,
+        )
+        # p-value must NOT be exactly 0.01 or 0.5 (the old hard-coded values)
+        assert result.p_value not in (0.01, 0.5)
+        assert 0 <= result.p_value <= 1
+
+    def test_vuong_h1_confidence_interval_is_statistical(self):
+        """H1 CI should not be R^2 +/- 0.1."""
+        from src.hypothesis.hypothesis_tester import HypothesisTester
+        from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
+        from src.estimation.estimator import EstimationResult
+
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        observed = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est_params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.85)
+        result = tester.test_h1_epidemic_dynamics(
+            state_history=observed,
+            estimated_params=est_params,
+            observed_data=observed,
+        )
+        lo, hi = result.confidence_interval
+        # CI width should not be exactly 0.2 (the old +/-0.1)
+        assert abs(hi - lo - 0.2) > 0.001
+
+    def test_vuong_test_statistic_stored(self):
+        """The Vuong test statistic should be stored in additional_metrics."""
+        from src.hypothesis.hypothesis_tester import HypothesisTester
+        from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
+        from src.estimation.estimator import EstimationResult
+
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        observed = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est_params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.85)
+        result = tester.test_h1_epidemic_dynamics(
+            state_history=observed,
+            estimated_params=est_params,
+            observed_data=observed,
+        )
+        assert 'vuong_statistic' in result.additional_metrics
+        assert isinstance(result.additional_metrics['vuong_statistic'], float)
+
+    def test_vuong_seir_r2_in_additional_metrics(self):
+        """R^2 should still be available in additional_metrics for reference."""
+        from src.hypothesis.hypothesis_tester import HypothesisTester
+        from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
+        from src.estimation.estimator import EstimationResult
+
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        observed = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est_params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.85)
+        result = tester.test_h1_epidemic_dynamics(
+            state_history=observed,
+            estimated_params=est_params,
+            observed_data=observed,
+        )
+        assert 'seir_r_squared' in result.additional_metrics
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
