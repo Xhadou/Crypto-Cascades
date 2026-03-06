@@ -39,6 +39,7 @@ class EstimationResult:
     loss: float = 0.0
     r_squared: float = 0.0
     aic: float = 0.0
+    aicc: float = 0.0
     bic: float = 0.0
     
     # Convergence info
@@ -364,6 +365,10 @@ class ParameterEstimator:
             ll = -n / 2 * (1 + np.log(2 * np.pi * sigma2))
             
             result.aic = 2 * k - 2 * ll
+            if n > k + 1:
+                result.aicc = result.aic + 2 * k * (k + 1) / (n - k - 1)
+            else:
+                result.aicc = np.inf
             result.bic = k * np.log(n) - 2 * ll
         
         return result

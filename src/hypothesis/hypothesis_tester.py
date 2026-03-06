@@ -533,6 +533,19 @@ class HypothesisTester:
         # AIC = n*ln(SSE/n) + 2k
         return n_obs * np.log(sse / n_obs) + 2 * n_params
 
+    def _compute_aicc(self, sse: float, n_params: int, n_obs: int) -> float:
+        """Compute corrected Akaike Information Criterion (AICc).
+
+        AICc = AIC + 2k(k+1)/(n-k-1) where k=number of parameters,
+        n=number of observations. Returns inf when n <= k+1 (correction
+        is undefined).
+        """
+        aic = self._compute_aic(sse, n_params, n_obs)
+        if aic == np.inf or n_obs <= n_params + 1:
+            return np.inf
+        correction = 2 * n_params * (n_params + 1) / (n_obs - n_params - 1)
+        return aic + correction
+
     def _inconclusive_result(self, hypothesis: str, reason: str) -> HypothesisResult:
         """Return an inconclusive hypothesis result."""
         return HypothesisResult(
