@@ -498,6 +498,121 @@ class TestH6Permutation:
         assert result.additional_metrics['n_permutations'] >= 1000
 
 
+class TestH4Survival:
+    """Tests for H4 Cox proportional hazards survival analysis."""
+
+    def test_h4_uses_cox_model(self):
+        """H4 should use Cox PH model, not just rank correlation."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        # Higher degree -> earlier infection (negative correlation)
+        infection_times = {
+            n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
+            for n in list(G.nodes())[:100]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        assert 'hazard_ratio' in result.additional_metrics
+
+    def test_h4_hazard_ratio_greater_than_one(self):
+        """Higher degree should predict faster infection (HR > 1)."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        # Strong signal: higher degree -> much earlier infection
+        infection_times = {
+            n: max(200 - degrees[n] * 5 + np.random.normal(0, 2), 0.01)
+            for n in list(G.nodes())[:150]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        # Higher degree => earlier infection => higher hazard => HR > 1
+        assert result.additional_metrics['hazard_ratio'] > 1.0
+
+    def test_h4_cox_p_value_is_primary(self):
+        """When Cox PH succeeds, its p-value should be the primary p-value."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        infection_times = {
+            n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
+            for n in list(G.nodes())[:100]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        assert result.p_value == result.additional_metrics['cox_p_value']
+
+    def test_h4_mann_whitney_still_reported(self):
+        """Mann-Whitney U result should still be in additional_metrics."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        infection_times = {
+            n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
+            for n in list(G.nodes())[:100]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        assert 'mann_whitney_statistic' in result.additional_metrics
+        assert 'mann_whitney_p_value' in result.additional_metrics
+
+    def test_h4_cox_concordance_reported(self):
+        """Cox model concordance index should be reported."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        infection_times = {
+            n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
+            for n in list(G.nodes())[:100]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        assert 'cox_concordance' in result.additional_metrics
+        # Concordance should be between 0 and 1
+        assert 0 <= result.additional_metrics['cox_concordance'] <= 1
+
+
 class TestH5Permutation:
     """Tests for H5 permutation test fix."""
 

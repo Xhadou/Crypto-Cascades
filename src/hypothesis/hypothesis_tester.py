@@ -1146,23 +1146,75 @@ class HypothesisTester:
         ci_lower = np.percentile(mean_diffs, 2.5)
         ci_upper = np.percentile(mean_diffs, 97.5)
 
+        # --- Cox Proportional Hazards survival analysis ---
+        # Models time-to-infection as a function of node degree,
+        # giving hazard ratios and proper p-values for the
+        # centrality -> infection-time relationship.
+        hazard_ratio = None
+        cox_p_value = None
+        cox_concordance = None
+        try:
+            from lifelines import CoxPHFitter
+
+            max_time = max(infection_times.values()) + 1
+            survival_data = []
+            for node in G.nodes():
+                deg = G.degree(node)
+                infected = node in infection_times
+                time = infection_times.get(node, max_time)
+                survival_data.append({
+                    'time': max(float(time), 0.01),
+                    'event': int(infected),
+                    'degree': float(deg)
+                })
+            df_surv = pd.DataFrame(survival_data)
+
+            cph = CoxPHFitter()
+            cph.fit(df_surv, duration_col='time', event_col='event')
+            hazard_ratio = float(np.exp(cph.params_['degree']))
+            cox_p_value = float(cph.summary.loc['degree', 'p'])
+            cox_concordance = float(cph.concordance_index_)
+            self.logger.info(
+                f"H4 Cox PH: hazard_ratio={hazard_ratio:.4f}, "
+                f"p={cox_p_value:.4e}, concordance={cox_concordance:.4f}"
+            )
+        except ImportError:
+            self.logger.warning(
+                "lifelines not installed; Cox PH analysis skipped for H4. "
+                "Install with: pip install lifelines"
+            )
+        except Exception as e:
+            self.logger.warning(f"Cox PH model failed for H4: {e}")
+
+        # Use Cox p-value as primary if available (more powerful test)
+        primary_p = cox_p_value if cox_p_value is not None else p_value
+        primary_stat = hazard_ratio if hazard_ratio is not None else float(stat)
+
+        additional_metrics = {
+            'mean_time_high_centrality': np.mean(high_centrality_times) if high_centrality_times else float('nan'),
+            'mean_time_low_centrality': np.mean(low_centrality_times) if low_centrality_times else float('nan'),
+            'median_centrality': median_centrality,
+            'n_high_centrality': n1,
+            'n_low_centrality': n2,
+            'mann_whitney_statistic': float(stat),
+            'mann_whitney_p_value': float(p_value),
+        }
+        if hazard_ratio is not None:
+            additional_metrics['hazard_ratio'] = hazard_ratio
+            additional_metrics['cox_p_value'] = cox_p_value
+            additional_metrics['cox_concordance'] = cox_concordance
+
         return HypothesisResult(
             hypothesis="H4",
             description="High-centrality nodes are infected earlier",
-            test_statistic=float(stat),
-            p_value=float(p_value),
+            test_statistic=float(primary_stat),
+            p_value=float(primary_p),
             effect_size=float(effect_size),
             confidence_interval=(float(ci_lower), float(ci_upper)),
-            reject_null=bool(p_value < self.alpha),
+            reject_null=bool(primary_p < self.alpha),
             alpha=self.alpha,
             sample_size=n1 + n2,
-            additional_metrics={
-                'mean_time_high_centrality': np.mean(high_centrality_times) if high_centrality_times else float('nan'),
-                'mean_time_low_centrality': np.mean(low_centrality_times) if low_centrality_times else float('nan'),
-                'median_centrality': median_centrality,
-                'n_high_centrality': n1,
-                'n_low_centrality': n2
-            }
+            additional_metrics=additional_metrics
         )
     
     def test_h5_community_clustering(
