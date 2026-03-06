@@ -21,6 +21,13 @@ try:
 except ImportError:
     HAS_POWERLAW = False
 
+# Try to import NetworKit for fast centrality on large graphs
+try:
+    import networkit as nk  # type: ignore
+    HAS_NETWORKIT = True
+except ImportError:
+    HAS_NETWORKIT = False
+
 
 class NetworkMetrics:
     """Compute network metrics and centrality measures."""
@@ -41,6 +48,40 @@ class NetworkMetrics:
         self.clustering_sample = thresholds.get('clustering_sample_size', 10000)
         self.min_degrees_powerlaw = thresholds.get('min_degrees_for_powerlaw', 50)
         
+    def _compute_betweenness_networkit(
+        self,
+        G: Union[nx.Graph, nx.DiGraph],
+        normalized: bool = True
+    ) -> Dict:
+        """Use NetworKit for fast approximate betweenness on large graphs.
+
+        Converts the NetworkX graph to a NetworKit graph, runs approximate
+        betweenness centrality estimation, and maps scores back to the
+        original NetworkX node identifiers.
+
+        Args:
+            G: NetworkX graph (directed or undirected).
+            normalized: Whether to normalize scores (consistent with
+                        NetworkX convention).
+
+        Returns:
+            Dict mapping NetworkX node IDs to betweenness centrality scores.
+        """
+        directed = G.is_directed()
+        nk_graph, node_map = nk.nxadapter.nx2nk(G, weightAttr=None)
+        # node_map: dict mapping nx node -> nk node index
+        reverse_map = {v: k for k, v in node_map.items()}
+
+        bc = nk.centrality.EstimateBetweenness(
+            nk_graph,
+            nSamples=self.betweenness_sample,
+            normalized=normalized,
+            parallel=True,
+        )
+        bc.run()
+        scores = bc.scores()
+        return {reverse_map[i]: scores[i] for i in range(len(scores))}
+
     def compute_centrality_measures(
         self,
         G: Union[nx.Graph, nx.DiGraph],
@@ -93,23 +134,39 @@ class NetworkMetrics:
         
         # Betweenness centrality (expensive - O(VE))
         if 'betweenness' in measures:
-            if n_nodes > self.large_graph_nodes and sample_size is None:
-                self.logger.warning(
-                    f"Betweenness centrality on {n_nodes:,} nodes is expensive. "
-                    f"Using k={self.betweenness_sample} sample approximation."
+            if HAS_NETWORKIT and n_nodes > self.large_graph_nodes:
+                self.logger.info(
+                    f"  Computing betweenness centrality via NetworKit "
+                    f"({n_nodes:,} nodes, {self.betweenness_sample} samples)..."
                 )
-                sample_size = min(self.betweenness_sample, n_nodes)
-            
-            self.logger.info("  Computing betweenness centrality...")
-            try:
-                if sample_size:
-                    results['betweenness'] = nx.betweenness_centrality(
-                        G, k=sample_size, normalized=normalized
+                try:
+                    results['betweenness'] = self._compute_betweenness_networkit(
+                        G, normalized=normalized
                     )
-                else:
-                    results['betweenness'] = nx.betweenness_centrality(G, normalized=normalized)
-            except Exception as e:
-                self.logger.warning(f"Betweenness failed: {e}")
+                except Exception as e:
+                    self.logger.warning(
+                        f"NetworKit betweenness failed, falling back to NetworkX: {e}"
+                    )
+                    results.pop('betweenness', None)
+
+            if 'betweenness' not in results:
+                if n_nodes > self.large_graph_nodes and sample_size is None:
+                    self.logger.warning(
+                        f"Betweenness centrality on {n_nodes:,} nodes is expensive. "
+                        f"Using k={self.betweenness_sample} sample approximation."
+                    )
+                    sample_size = min(self.betweenness_sample, n_nodes)
+
+                self.logger.info("  Computing betweenness centrality...")
+                try:
+                    if sample_size:
+                        results['betweenness'] = nx.betweenness_centrality(
+                            G, k=sample_size, normalized=normalized
+                        )
+                    else:
+                        results['betweenness'] = nx.betweenness_centrality(G, normalized=normalized)
+                except Exception as e:
+                    self.logger.warning(f"Betweenness failed: {e}")
         
         # Closeness centrality (expensive - O(V^2))
         if 'closeness' in measures:
