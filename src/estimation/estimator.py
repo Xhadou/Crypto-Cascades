@@ -91,7 +91,7 @@ class ParameterEstimator:
         self.random_seed = random_seed
         self.n_bootstrap = n_bootstrap
         self.block_length_rule = 'sqrt'  # block length = sqrt(T)
-        np.random.seed(random_seed)
+        self.rng = np.random.default_rng(random_seed)
 
         self.logger = get_logger(__name__)
 

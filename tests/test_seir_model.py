@@ -431,5 +431,55 @@ class TestSolveIVP:
         assert 'from scipy.integrate import odeint' not in source
 
 
+class TestRNG:
+    """Tests for instance-level RNG (np.random.default_rng) instead of global seed."""
+
+    def test_model_has_rng_instance(self):
+        """Model should use np.random.default_rng, not global seed."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        assert hasattr(model, 'rng')
+        assert isinstance(model.rng, np.random.Generator)
+
+    def test_rng_reproducibility(self):
+        """Two models with same seed should produce identical results."""
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        m1 = NetworkSEIR(params, random_seed=42)
+        m2 = NetworkSEIR(params, random_seed=42)
+        r1 = m1.simulate_meanfield(N=1000, initial_infected=10, t_max=50)
+        r2 = m2.simulate_meanfield(N=1000, initial_infected=10, t_max=50)
+        np.testing.assert_array_equal(r1['I'].values, r2['I'].values)
+
+    def test_rng_different_seeds_differ(self):
+        """Two models with different seeds should produce different stochastic results."""
+        params = SEIRParameters(beta=0.4, sigma=0.3, gamma=0.15, omega=0.0)
+        G = nx.barabasi_albert_graph(100, 3, seed=42)
+        m1 = NetworkSEIR(params, random_seed=42)
+        m2 = NetworkSEIR(params, random_seed=99)
+        r1 = m1.simulate_network_stochastic(G, initial_infected=[0, 1, 2], t_max=20)
+        r2 = m2.simulate_network_stochastic(G, initial_infected=[0, 1, 2], t_max=20)
+        # Stochastic simulations with different seeds should diverge
+        assert not np.array_equal(r1['I'].values, r2['I'].values)
+
+    def test_rng_stochastic_reproducibility(self):
+        """Same seed should produce identical stochastic simulation results."""
+        params = SEIRParameters(beta=0.4, sigma=0.3, gamma=0.15, omega=0.0)
+        G = nx.barabasi_albert_graph(100, 3, seed=42)
+        m1 = NetworkSEIR(params, random_seed=42)
+        m2 = NetworkSEIR(params, random_seed=42)
+        r1 = m1.simulate_network_stochastic(G, initial_infected=[0, 1, 2], t_max=20)
+        r2 = m2.simulate_network_stochastic(G, initial_infected=[0, 1, 2], t_max=20)
+        np.testing.assert_array_equal(r1['I'].values, r2['I'].values)
+
+    def test_no_global_random_seed_in_source(self):
+        """Source code should not contain np.random.seed calls."""
+        import inspect
+        import src.epidemic_model.network_seir as module
+        source = inspect.getsource(module)
+        assert 'np.random.seed(' not in source, (
+            "Module should not use np.random.seed(); use self.rng instead"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

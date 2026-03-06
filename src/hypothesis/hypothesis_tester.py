@@ -67,8 +67,8 @@ class HypothesisTester:
         """
         self.alpha = alpha
         self.random_seed = random_seed
-        np.random.seed(random_seed)
-        
+        self.rng = np.random.default_rng(random_seed)
+
         self.logger = get_logger(__name__)
         
     def test_all(
@@ -312,7 +312,7 @@ class HypothesisTester:
             n_bootstrap = 1000
             bootstrap_diffs = []
             for _ in range(n_bootstrap):
-                boot_bulls = np.random.choice(bull_array, size=len(bull_array), replace=True)
+                boot_bulls = self.rng.choice(bull_array, size=len(bull_array), replace=True)
                 bootstrap_diffs.append(np.mean(boot_bulls) - r0_bear_market)
             
             ci_lower = np.percentile(bootstrap_diffs, 2.5)
@@ -837,7 +837,7 @@ class HypothesisTester:
             # 95% CI of the observed factor from bootstrap resampling of degrees
             bootstrap_factors = []
             for _ in range(1000):
-                sample_idx = np.random.choice(n_nodes, size=n_nodes, replace=True)
+                sample_idx = self.rng.choice(n_nodes, size=n_nodes, replace=True)
                 sample_degrees = [degrees[i] for i in sample_idx]
                 k_mean_boot = np.mean(sample_degrees)
                 k2_mean_boot = np.mean([d**2 for d in sample_degrees])
@@ -1139,8 +1139,8 @@ class HypothesisTester:
         mean_diffs = []
 
         for _ in range(n_bootstrap):
-            h_sample = np.random.choice(high_centrality_times, size=len(high_centrality_times), replace=True)
-            l_sample = np.random.choice(low_centrality_times, size=len(low_centrality_times), replace=True)
+            h_sample = self.rng.choice(high_centrality_times, size=len(high_centrality_times), replace=True)
+            l_sample = self.rng.choice(low_centrality_times, size=len(low_centrality_times), replace=True)
             mean_diffs.append(np.mean(h_sample) - np.mean(l_sample))
 
         ci_lower = np.percentile(mean_diffs, 2.5)
@@ -1330,7 +1330,7 @@ class HypothesisTester:
 
         edges = list(G.edges())
         for _ in range(n_bootstrap):
-            sample_edges = [edges[i] for i in np.random.choice(len(edges), size=len(edges), replace=True)]
+            sample_edges = [edges[i] for i in self.rng.choice(len(edges), size=len(edges), replace=True)]
             within = sum(1 for u, v in sample_edges
                         if node_to_community.get(u, -1) == node_to_community.get(v, -1))
             bootstrap_fracs.append(within / len(sample_edges))

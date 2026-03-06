@@ -105,8 +105,8 @@ class NetworkSEIR:
         """
         self.params = params or SEIRParameters()
         self.random_seed = random_seed
-        np.random.seed(random_seed)
-        
+        self.rng = np.random.default_rng(random_seed)
+
         self.logger = get_logger(__name__)
 
     def __getstate__(self):
@@ -343,22 +343,22 @@ class NetworkSEIR:
             if degree > 0 and infected_neighbors > 0:
                 # Probability based on fraction of infected neighbors
                 p_expose = 1 - (1 - beta_eff) ** infected_neighbors
-                if np.random.random() < p_expose:
+                if self.rng.random() < p_expose:
                     return State.EXPOSED
-                    
+
         elif current_state == State.EXPOSED:
             # E -> I: Incubation ends
-            if np.random.random() < self.params.sigma:
+            if self.rng.random() < self.params.sigma:
                 return State.INFECTED
-                
+
         elif current_state == State.INFECTED:
             # I -> R: Recovery
-            if np.random.random() < self.params.gamma:
+            if self.rng.random() < self.params.gamma:
                 return State.RECOVERED
-                
+
         elif current_state == State.RECOVERED:
             # R -> S: Immunity waning
-            if np.random.random() < self.params.omega:
+            if self.rng.random() < self.params.omega:
                 return State.SUSCEPTIBLE
                 
         return current_state
@@ -435,7 +435,7 @@ class NetworkSEIR:
         # Bootstrap CI
         r0_samples = []
         for _ in range(n_bootstrap):
-            boot_degrees = np.random.choice(degrees, len(degrees), replace=True).tolist()
+            boot_degrees = self.rng.choice(degrees, len(degrees), replace=True).tolist()
             r0_samples.append(compute_r0_from_degrees(boot_degrees))
 
         ci = (float(np.percentile(r0_samples, 2.5)),
@@ -528,7 +528,7 @@ class NetworkSEIR:
 
                         R_t_samples = []
                         for _ in range(100):
-                            boot_idx = np.random.choice(min_len, min_len, replace=True)
+                            boot_idx = self.rng.choice(min_len, min_len, replace=True)
                             boot_I = np.mean(I_aligned[boot_idx])
                             boot_new = np.sum(new_inf_aligned[boot_idx])
                             if boot_I > 0:
@@ -683,14 +683,14 @@ class NetworkSEIR:
                 break
 
             # Time to next event (exponential distribution)
-            dt = np.random.exponential(1.0 / total_rate)
+            dt = self.rng.exponential(1.0 / total_rate)
             t += dt
 
             if t > t_max:
                 break
 
             # Choose which event occurs
-            rand = np.random.random() * total_rate
+            rand = self.rng.random() * total_rate
 
             if rand < exposure_rate:
                 # Exposure event: choose which S node
@@ -707,7 +707,7 @@ class NetworkSEIR:
             elif rand < exposure_rate + infection_rate:
                 # Infection event: random E node becomes I
                 if E_nodes:
-                    node = np.random.choice(list(E_nodes))
+                    node = self.rng.choice(list(E_nodes))
                     E_nodes.remove(node)
                     I_nodes.add(node)
                     node_states[node] = State.INFECTED
@@ -715,7 +715,7 @@ class NetworkSEIR:
             elif rand < exposure_rate + infection_rate + recovery_rate:
                 # Recovery event: random I node becomes R
                 if I_nodes:
-                    node = np.random.choice(list(I_nodes))
+                    node = self.rng.choice(list(I_nodes))
                     I_nodes.remove(node)
                     R_nodes.add(node)
                     node_states[node] = State.RECOVERED
@@ -723,7 +723,7 @@ class NetworkSEIR:
             else:
                 # Immunity waning: random R node becomes S
                 if R_nodes:
-                    node = np.random.choice(list(R_nodes))
+                    node = self.rng.choice(list(R_nodes))
                     R_nodes.remove(node)
                     S_nodes.add(node)
                     node_states[node] = State.SUSCEPTIBLE
@@ -795,25 +795,37 @@ class NetworkSEIR:
             Dict with mean, std, and percentiles for each state
         """
         self.logger.info(f"Running {n_simulations} Monte Carlo simulations...")
-        
+
         all_results = []
         nodes = list(G.nodes())
-        
+
+        # Spawn independent child seeds for each run
+        from numpy.random import SeedSequence
+        ss = SeedSequence(self.random_seed)
+        child_seeds = ss.spawn(n_simulations)
+
         for i in range(n_simulations):
-            # Random initial infected
-            np.random.seed(self.random_seed + i)
-            initial_infected = np.random.choice(
-                nodes, 
+            # Each run gets its own RNG from a spawned seed
+            run_rng = np.random.default_rng(child_seeds[i])
+            initial_infected = run_rng.choice(
+                nodes,
                 size=min(initial_infected_count, len(nodes)),
                 replace=False
             ).tolist()
-            
+
+            # Temporarily swap in per-run RNG for stochastic simulation
+            saved_rng = self.rng
+            self.rng = run_rng
+
             # Run simulation
             df = self.simulate_network_stochastic(
                 G, initial_infected, t_max, fgi_values
             )
             df['run'] = i
             all_results.append(df)
+
+            # Restore original RNG
+            self.rng = saved_rng
             
         # Combine results
         combined = pd.concat(all_results, ignore_index=True)
@@ -847,29 +859,40 @@ class NetworkSEIR:
     ) -> pd.DataFrame:
         """
         Execute a single Monte Carlo simulation (picklable for multiprocessing).
-        
+
         Args:
             G: NetworkX graph
             initial_infected_count: Number of initial infected
             t_max: Maximum time
             fgi_values: Fear & Greed Index values
             run_idx: Index for random seed offset
-            
+
         Returns:
             DataFrame with simulation results for this run
         """
+        from numpy.random import SeedSequence
         nodes = list(G.nodes())
-        np.random.seed(self.random_seed + run_idx)
-        initial_infected = np.random.choice(
+        # Create a deterministic child seed for this run
+        ss = SeedSequence(self.random_seed)
+        child_seed = ss.spawn(run_idx + 1)[run_idx]
+        run_rng = np.random.default_rng(child_seed)
+
+        initial_infected = run_rng.choice(
             nodes,
             size=min(initial_infected_count, len(nodes)),
             replace=False
         ).tolist()
-        
+
+        # Use per-run RNG for stochastic simulation
+        saved_rng = self.rng
+        self.rng = run_rng
+
         df = self.simulate_network_stochastic(
             G, initial_infected, t_max, fgi_values
         )
         df['run'] = run_idx
+
+        self.rng = saved_rng
         return df
 
     def run_monte_carlo_parallel(
