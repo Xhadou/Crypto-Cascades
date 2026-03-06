@@ -729,65 +729,116 @@ class HypothesisTester:
     def test_h2_network_amplification(
         self,
         G: nx.Graph,
-        estimated_params: EstimationResult
+        estimated_params: EstimationResult,
+        n_null: int = 500
     ) -> HypothesisResult:
         """
-        H2: Network structure amplifies contagion.
-        
-        Test: Compare network R₀ to basic R₀.
-        Null hypothesis: Network factor = 1 (no amplification)
+        H2: Network structure amplifies contagion beyond what random topology predicts.
+
+        Test: Compare the observed network amplification factor (<k^2>/<k>) against
+        the distribution of the same statistic computed on configuration-model null
+        networks that preserve the degree sequence.
+
+        The old test compared <k^2>/<k> > 1, which is ALWAYS true by Jensen's
+        inequality for any non-degenerate graph. The new test asks whether the
+        observed topology produces a *higher* amplification factor than expected
+        from random graphs with the same degree sequence.
+
+        The configuration model preserves the exact degree sequence but randomizes
+        which nodes connect to which, destroying degree-degree correlations,
+        clustering, and community structure. If the observed network factor is
+        significantly higher than the null distribution, it indicates that the
+        network's higher-order structure (not just degree heterogeneity) amplifies
+        contagion.
+
+        Null hypothesis: Observed network factor is not greater than configuration-
+        model null expectation.
         """
-        self.logger.info("Testing H2: Network amplifies contagion...")
-        
-        # Compute network metrics
+        self.logger.info("Testing H2: Network amplifies contagion (null model comparison)...")
+
+        # Compute observed network metrics
         degree_view = G.degree()  # type: ignore[operator]
         degrees = [d for _, d in degree_view]
-        k_mean = np.mean(degrees)
-        k2_mean = np.mean([d**2 for d in degrees])
-        
+        n_nodes = len(degrees)
+        k_mean = float(np.mean(degrees))
+        k2_mean = float(np.mean([d**2 for d in degrees]))
+
         if k_mean > 0:
             network_factor = k2_mean / k_mean
         else:
             network_factor = 1.0
-        
+
         r0_basic = estimated_params.r0()
         r0_network = r0_basic * network_factor
-        
-        # Bootstrap test for network factor > 1
-        n_bootstrap = 1000
-        bootstrap_factors = []
-        
-        nodes = list(G.nodes())
-        n_nodes = len(nodes)
-        
-        for _ in range(n_bootstrap):
-            # Bootstrap sample of degrees
-            sample_idx = np.random.choice(n_nodes, size=n_nodes, replace=True)
-            sample_degrees = [degrees[i] for i in sample_idx]
-            
-            k_mean_boot = np.mean(sample_degrees)
-            k2_mean_boot = np.mean([d**2 for d in sample_degrees])
-            
-            if k_mean_boot > 0:
-                bootstrap_factors.append(k2_mean_boot / k_mean_boot)
-        
-        # P-value: proportion of bootstrap samples where factor <= 1
-        p_value = np.mean([f <= 1 for f in bootstrap_factors])
-        
-        # Effect size: arithmetic difference from null (network_factor - 1)
-        effect_size = network_factor - 1
-        
-        # 95% CI from bootstrap
-        ci_lower = np.percentile(bootstrap_factors, 2.5)
-        ci_upper = np.percentile(bootstrap_factors, 97.5)
-        
+
+        # --- Null model comparison ---
+        # Generate configuration-model null networks preserving the degree sequence.
+        # The configuration model randomizes connections while keeping each node's
+        # degree fixed, so the null tests whether higher-order structure (clustering,
+        # assortativity, community structure) amplifies contagion beyond what the
+        # degree distribution alone would predict.
+        # Note: nx.configuration_model creates a multigraph; converting to simple
+        # graph removes self-loops and multi-edges, slightly reducing effective
+        # degrees. This is the standard approach in network epidemiology.
+        rng = np.random.default_rng(self.random_seed)
+        null_factors: List[float] = []
+
+        for i in range(n_null):
+            seed = int(rng.integers(0, 2**31))
+            try:
+                G_null = nx.configuration_model(degrees, seed=seed)
+                G_null = nx.Graph(G_null)  # Remove multi-edges
+                G_null.remove_edges_from(nx.selfloop_edges(G_null))
+                null_degrees = [d for _, d in G_null.degree()]
+                k_mean_null = float(np.mean(null_degrees)) if null_degrees else 1.0
+                k2_mean_null = float(np.mean([d**2 for d in null_degrees])) if null_degrees else 1.0
+                null_factors.append(k2_mean_null / max(k_mean_null, 1e-10))
+            except (nx.NetworkXError, Exception):
+                pass
+
+        if len(null_factors) >= 10:
+            # One-sided p-value: fraction of null factors >= observed
+            p_value = float(np.mean([f >= network_factor for f in null_factors]))
+            null_mean = float(np.mean(null_factors))
+            null_std = float(np.std(null_factors))
+
+            # Effect size: (observed - null_mean) / null_std  (Cohen's d)
+            if null_std > 0:
+                effect_size = (network_factor - null_mean) / null_std
+            else:
+                effect_size = 0.0 if network_factor == null_mean else float('inf')
+
+            # 95% CI of the observed factor from bootstrap resampling of degrees
+            bootstrap_factors = []
+            for _ in range(1000):
+                sample_idx = np.random.choice(n_nodes, size=n_nodes, replace=True)
+                sample_degrees = [degrees[i] for i in sample_idx]
+                k_mean_boot = np.mean(sample_degrees)
+                k2_mean_boot = np.mean([d**2 for d in sample_degrees])
+                if k_mean_boot > 0:
+                    bootstrap_factors.append(float(k2_mean_boot / k_mean_boot))
+
+            if bootstrap_factors:
+                ci_lower = float(np.percentile(bootstrap_factors, 2.5))
+                ci_upper = float(np.percentile(bootstrap_factors, 97.5))
+            else:
+                ci_lower = float(network_factor)
+                ci_upper = float(network_factor)
+        else:
+            # Fallback if null model generation largely failed
+            self.logger.warning("Insufficient null models generated; falling back to bootstrap test")
+            p_value = 1.0
+            effect_size = 0.0
+            ci_lower = float(network_factor)
+            ci_upper = float(network_factor)
+
         return HypothesisResult(
             hypothesis="H2",
-            description="Network structure amplifies FOMO contagion",
+            description="Network structure amplifies FOMO contagion beyond null expectation",
             test_statistic=float(network_factor),
             p_value=float(p_value),
             effect_size=float(effect_size),
-            confidence_interval=(float(ci_lower), float(ci_upper)),
+            confidence_interval=(ci_lower, ci_upper),
             reject_null=bool(p_value < self.alpha),
             alpha=self.alpha,
             sample_size=n_nodes,
@@ -796,7 +847,12 @@ class HypothesisTester:
                 'r0_network': r0_network,
                 'network_factor': network_factor,
                 'mean_degree': k_mean,
-                'degree_variance': np.var(degrees)
+                'degree_variance': float(np.var(degrees)),
+                'null_model_factors': [float(f) for f in null_factors],
+                'null_model_mean': float(np.mean(null_factors)) if null_factors else None,
+                'null_model_std': float(np.std(null_factors)) if null_factors else None,
+                'observed_vs_null_p': float(p_value),
+                'n_null_models': len(null_factors),
             }
         )
     

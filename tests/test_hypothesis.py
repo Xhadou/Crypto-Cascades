@@ -235,6 +235,68 @@ class TestStatisticalValidity:
             assert result.reject_null == False
 
 
+class TestH2NullModel:
+    """Tests for H2 null model comparison (replacing trivial >1 test)."""
+
+    @pytest.fixture
+    def tester(self):
+        return HypothesisTester(alpha=0.05, random_seed=42)
+
+    @pytest.fixture
+    def test_params(self):
+        return EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.8)
+
+    def test_h2_compares_against_null_models(self, tester, test_params):
+        """H2 should test network factor against null models, not against 1."""
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params)
+        # Result should contain null model comparison info
+        assert 'null_model_factors' in result.additional_metrics
+        assert 'observed_vs_null_p' in result.additional_metrics
+
+    def test_h2_null_model_p_value_used(self, tester, test_params):
+        """H2 p-value should come from null model comparison, not bootstrap >1."""
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params)
+        # The p-value should equal the null model comparison p-value
+        assert result.p_value == result.additional_metrics['observed_vs_null_p']
+
+    def test_h2_regular_graph_not_significant(self, tester, test_params):
+        """A k-regular graph should NOT show significant amplification vs
+        configuration-model null networks.
+
+        A regular graph has uniform degree distribution, so the configuration
+        model null (which preserves the degree sequence) should produce very
+        similar network factors. The test should not reject.
+        """
+        G = nx.random_regular_graph(6, 200, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params, n_null=200)
+        # For a regular graph the observed factor should be close to the null
+        # distribution, so the effect size should be small.
+        assert result.additional_metrics['n_null_models'] > 0
+        # The null factors should be close to observed (within reason)
+        null_mean = result.additional_metrics['null_model_mean']
+        observed = result.additional_metrics['network_factor']
+        # Relative difference should be small (< 5%)
+        assert abs(observed - null_mean) / observed < 0.05
+
+    def test_h2_null_model_factors_list(self, tester, test_params):
+        """null_model_factors should be a non-empty list of floats."""
+        G = nx.barabasi_albert_graph(100, 3, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params)
+        factors = result.additional_metrics['null_model_factors']
+        assert isinstance(factors, list)
+        assert len(factors) > 0
+        assert all(isinstance(f, float) for f in factors)
+
+    def test_h2_network_factor_still_in_metrics(self, tester, test_params):
+        """The observed network factor should still be reported."""
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params)
+        assert 'network_factor' in result.additional_metrics
+        assert result.additional_metrics['network_factor'] > 1
+
+
 class TestVuongTest:
     """Tests for Vuong test replacing fabricated H1 p-value."""
 
