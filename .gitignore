@@ -35,6 +35,7 @@ env/
 .claude/
 *.swp
 *.swo
+CLAUDE.md
 
 # Jupyter
 .ipynb_checkpoints/
