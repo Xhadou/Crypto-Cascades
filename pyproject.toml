@@ -28,7 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-bayesian = ["numpyro>=0.15.0", "jax[cpu]>=0.4.0"]
+bayesian = ["numpyro>=0.15.0", "jax>=0.4.0"]
+bayesian-cpu = ["numpyro>=0.15.0", "jax[cpu]>=0.4.0"]
+bayesian-cuda = ["numpyro>=0.15.0", "jax[cuda12]>=0.4.0"]
 fast = ["networkit>=11.0"]
 viz = ["SciencePlots>=2.1"]
 dev = [

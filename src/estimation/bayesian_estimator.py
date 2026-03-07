@@ -25,6 +25,19 @@ try:
     from numpyro.infer import MCMC, NUTS
 
     HAS_NUMPYRO = True
+
+    # Auto-detect GPU; fall back to CPU silently
+    try:
+        _gpu_available = len(jax.devices("gpu")) > 0
+    except RuntimeError:
+        _gpu_available = False
+
+    if _gpu_available:
+        numpyro.set_platform("gpu")
+        logger.info("JAX GPU backend detected — using GPU for MCMC")
+    else:
+        numpyro.set_platform("cpu")
+        logger.debug("No GPU detected — using CPU for MCMC")
 except ImportError:
     HAS_NUMPYRO = False
 

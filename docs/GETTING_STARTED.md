@@ -51,8 +51,10 @@ pip install -r requirements.txt
 **Optional extras** for advanced features:
 
 ```bash
-# Bayesian MCMC estimation (NumPyro + JAX)
-pip install numpyro "jax[cpu]"
+# Bayesian MCMC estimation (NumPyro + JAX) — auto-detects GPU at runtime
+pip install numpyro jax        # bare JAX, picks up GPU if CUDA is installed
+pip install numpyro "jax[cpu]" # force CPU-only (no CUDA required)
+pip install numpyro "jax[cuda12]" # explicit CUDA 12 GPU support
 
 # Fast centrality computation for large graphs (NetworKit)
 pip install networkit
