@@ -16,6 +16,14 @@ from src.utils.logger import get_logger
 # NetworkX >= 2.7 includes built-in Louvain community detection
 HAS_LOUVAIN = hasattr(nx.community, 'louvain_communities')
 
+# Leiden algorithm requires python-igraph + leidenalg
+try:
+    import igraph as ig
+    import leidenalg
+    HAS_LEIDEN = True
+except ImportError:
+    HAS_LEIDEN = False
+
 
 class CommunityDetector:
     """Detect communities in networks using various algorithms."""
@@ -92,6 +100,78 @@ class CommunityDetector:
             'community_sizes': community_sizes
         }
     
+    def detect_communities_leiden(
+        self,
+        G: Union[nx.Graph, nx.DiGraph],
+        resolution: float = 1.0,
+        random_state: int = 42
+    ) -> Dict:
+        """
+        Detect communities using the Leiden algorithm (Traag et al. 2019).
+
+        The Leiden algorithm improves on Louvain by guaranteeing connected
+        communities and converging to a partition where all subsets are
+        locally optimal. Requires ``python-igraph`` and ``leidenalg``.
+
+        If the optional dependencies are not installed, this method falls
+        back to the built-in Louvain implementation.
+
+        Args:
+            G: NetworkX graph (will be converted to undirected)
+            resolution: Resolution parameter. Higher values lead to more communities.
+            random_state: Random seed for reproducibility
+
+        Returns:
+            Dict with keys:
+                - 'partition': Dict mapping node to community ID
+                - 'modularity': Modularity score of the partition
+                - 'n_communities': Number of communities
+                - 'community_sizes': Dict mapping community ID to size
+        """
+        if not HAS_LEIDEN:
+            self.logger.warning(
+                "leidenalg not installed, falling back to Louvain"
+            )
+            return self.detect_communities_louvain(G, resolution, random_state)
+
+        self.logger.info("Detecting communities using Leiden algorithm...")
+
+        # Convert to undirected
+        if G.is_directed():
+            G = G.to_undirected()
+
+        # Convert NetworkX graph to igraph
+        ig_graph = ig.Graph.from_networkx(G)
+
+        # Run Leiden algorithm with modularity optimisation
+        partition = leidenalg.find_partition(
+            ig_graph,
+            leidenalg.ModularityVertexPartition,
+            resolution_parameter=resolution,
+            seed=random_state,
+        )
+
+        # Map igraph vertex indices back to NetworkX node labels
+        nx_partition = {}
+        for comm_id, members in enumerate(partition):
+            for node_idx in members:
+                nx_partition[ig_graph.vs[node_idx]['_nx_name']] = comm_id
+
+        modularity = partition.modularity
+        n_communities = len(partition)
+        community_sizes = {i: len(m) for i, m in enumerate(partition)}
+
+        self.logger.info(
+            f"Found {n_communities} communities with modularity {modularity:.4f}"
+        )
+
+        return {
+            'partition': nx_partition,
+            'modularity': modularity,
+            'n_communities': n_communities,
+            'community_sizes': community_sizes,
+        }
+
     def detect_communities_label_propagation(
         self,
         G: Union[nx.Graph, nx.DiGraph]
@@ -128,7 +208,7 @@ class CommunityDetector:
         # Calculate modularity
         try:
             modularity = nx.community.modularity(G, communities)
-        except:
+        except (nx.NetworkXError, ValueError):
             modularity = None
         
         n_communities = len(community_sizes)

@@ -61,9 +61,9 @@ class TestValidTransitions:
         """S cannot directly become R without going through E/I."""
         assert validate_transition(State.SUSCEPTIBLE, State.RECOVERED) == False
 
-    def test_invalid_e_to_s(self):
-        """E cannot go back to S."""
-        assert validate_transition(State.EXPOSED, State.SUSCEPTIBLE) == False
+    def test_valid_e_to_s(self):
+        """E can go back to S (exposure timeout)."""
+        assert validate_transition(State.EXPOSED, State.SUSCEPTIBLE) == True
 
     def test_invalid_e_to_r(self):
         """E cannot skip I and go directly to R."""
@@ -407,6 +407,291 @@ class TestReset:
         assert len(assigner.recovery_times) == 0
         assert len(assigner.last_buying_activity) == 0
         assert len(assigner.state_history) == 0
+
+
+class TestZScoreInfection:
+    """Tests for z-score based infection threshold."""
+
+    def test_small_net_positive_not_infected(self):
+        """Tiny net positive flow should NOT trigger infection via z-score."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # z = (0.6 - 0.5) / 0.3 = 0.33 < 1.5 -> not infected
+        assert not sa._is_buying_zscore(0.6, wallet_mean=0.5, wallet_std=0.3)
+
+    def test_large_net_positive_is_infected(self):
+        """Large net positive flow SHOULD trigger infection via z-score."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # z = (2.0 - 0.5) / 0.3 = 5.0 > 1.5 -> infected
+        assert sa._is_buying_zscore(2.0, wallet_mean=0.5, wallet_std=0.3)
+
+    def test_zero_std_falls_back(self):
+        """Zero std should fall back to simple threshold."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # With zero std, should use fallback (net_flow > infected_threshold)
+        # Default infected_threshold=0.0, so 0.1 > 0.0 -> True
+        assert sa._is_buying_zscore(0.1, wallet_mean=0.0, wallet_std=0.0)
+
+    def test_zero_std_negative_flow_not_infected(self):
+        """Zero std with negative flow should not trigger infection."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # Fallback: -0.5 > 0.0 -> False
+        assert not sa._is_buying_zscore(-0.5, wallet_mean=0.0, wallet_std=0.0)
+
+    def test_near_zero_std_falls_back(self):
+        """Near-zero std (below epsilon) should fall back to simple threshold."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # std < 1e-10, so fallback applies
+        assert sa._is_buying_zscore(0.5, wallet_mean=0.0, wallet_std=1e-12)
+
+    def test_exact_threshold_not_infected(self):
+        """Z-score exactly at threshold should NOT trigger infection (strict >)."""
+        sa = StateAssigner(infected_z_threshold=1.5)
+        # z = (0.95 - 0.5) / 0.3 = 1.5 exactly -> not infected (> not >=)
+        assert not sa._is_buying_zscore(0.95, wallet_mean=0.5, wallet_std=0.3)
+
+    def test_custom_z_threshold(self):
+        """Custom z-threshold should be respected."""
+        sa = StateAssigner(infected_z_threshold=2.0)
+        # z = (1.0 - 0.5) / 0.25 = 2.0 exactly -> not infected (strict >)
+        assert not sa._is_buying_zscore(1.0, wallet_mean=0.5, wallet_std=0.25)
+        # z = (1.5 - 0.5) / 0.25 = 4.0 > 2.0 -> infected
+        assert sa._is_buying_zscore(1.5, wallet_mean=0.5, wallet_std=0.25)
+
+    def test_default_z_threshold(self):
+        """Default z-threshold should be 1.5."""
+        sa = StateAssigner()
+        assert sa.infected_z_threshold == 1.5
+
+
+class TestExposureTimeout:
+    """Tests for exposure timeout (E -> S after timeout)."""
+
+    def test_exposed_returns_to_susceptible_after_timeout(self):
+        """Wallet in E state for > timeout days should return to S."""
+        sa = StateAssigner(exposure_timeout_days=14)
+        # Manually set exposure start time
+        sa.exposure_start_times[1] = datetime(2017, 10, 1)
+        current_time = datetime(2017, 10, 20)  # 19 days later > 14
+
+        G = nx.Graph()
+        G.add_node(1)
+
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.EXPOSED,
+            is_buying=False,
+            G=G,
+            infected_wallets=set(),
+            current_time=current_time,
+        )
+        assert new_state == State.SUSCEPTIBLE
+
+    def test_exposed_stays_exposed_before_timeout(self):
+        """Wallet in E state for < timeout days should stay E."""
+        sa = StateAssigner(exposure_timeout_days=14)
+        sa.exposure_start_times[1] = datetime(2017, 10, 1)
+        current_time = datetime(2017, 10, 10)  # 9 days later < 14
+
+        G = nx.Graph()
+        G.add_node(1)
+
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.EXPOSED,
+            is_buying=False,
+            G=G,
+            infected_wallets=set(),
+            current_time=current_time,
+        )
+        assert new_state == State.EXPOSED
+
+    def test_exposed_becomes_infected_even_after_timeout_if_buying(self):
+        """E wallet that starts buying transitions to I regardless of timeout."""
+        sa = StateAssigner(exposure_timeout_days=14)
+        sa.exposure_start_times[1] = datetime(2017, 10, 1)
+        current_time = datetime(2017, 10, 20)  # 19 days > 14
+
+        G = nx.Graph()
+        G.add_node(1)
+
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.EXPOSED,
+            is_buying=True,
+            G=G,
+            infected_wallets=set(),
+            current_time=current_time,
+        )
+        assert new_state == State.INFECTED
+
+    def test_exposed_at_boundary_stays_exposed(self):
+        """Wallet exactly at timeout boundary should stay E (strict >)."""
+        sa = StateAssigner(exposure_timeout_days=14)
+        sa.exposure_start_times[1] = datetime(2017, 10, 1)
+        current_time = datetime(2017, 10, 15)  # exactly 14 days
+
+        G = nx.Graph()
+        G.add_node(1)
+
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.EXPOSED,
+            is_buying=False,
+            G=G,
+            infected_wallets=set(),
+            current_time=current_time,
+        )
+        assert new_state == State.EXPOSED
+
+    def test_no_exposure_start_recorded_stays_exposed(self):
+        """If no exposure start time recorded, wallet stays E (no timeout)."""
+        sa = StateAssigner(exposure_timeout_days=14)
+        # No entry in exposure_start_times
+
+        G = nx.Graph()
+        G.add_node(1)
+
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.EXPOSED,
+            is_buying=False,
+            G=G,
+            infected_wallets=set(),
+            current_time=datetime(2017, 10, 20),
+        )
+        assert new_state == State.EXPOSED
+
+    def test_exposure_start_time_cleared_on_timeout(self):
+        """After E->S timeout, exposure_start_times entry should be removed."""
+        sa = StateAssigner(exposure_timeout_days=14)
+        sa.exposure_start_times[1] = datetime(2017, 10, 1)
+        current_time = datetime(2017, 10, 20)  # 19 days > 14
+
+        G = nx.Graph()
+        G.add_node(1)
+
+        sa._compute_new_state(
+            wallet=1,
+            prev_state=State.EXPOSED,
+            is_buying=False,
+            G=G,
+            infected_wallets=set(),
+            current_time=current_time,
+        )
+        assert 1 not in sa.exposure_start_times
+
+
+class TestSpontaneousInfection:
+    """Tests for spontaneous infection (importation from outside network)."""
+
+    def test_susceptible_can_self_infect_with_rate_1(self):
+        """S wallet should have epsilon chance of spontaneous I transition."""
+        sa = StateAssigner(spontaneous_infection_rate=1.0)  # 100% for test
+
+        G = nx.Graph()
+        G.add_node(1)
+
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.SUSCEPTIBLE,
+            is_buying=True,
+            G=G,
+            infected_wallets=set(),
+            current_time=datetime(2017, 10, 1),
+        )
+        assert new_state == State.INFECTED
+
+    def test_susceptible_no_spontaneous_with_rate_0(self):
+        """S wallet with rate=0 should never spontaneously infect."""
+        sa = StateAssigner(spontaneous_infection_rate=0.0)
+
+        G = nx.Graph()
+        G.add_node(1)
+
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.SUSCEPTIBLE,
+            is_buying=True,
+            G=G,
+            infected_wallets=set(),
+            current_time=datetime(2017, 10, 1),
+        )
+        # No infected neighbor, rate=0 -> stays S
+        assert new_state == State.SUSCEPTIBLE
+
+    def test_spontaneous_infection_requires_buying(self):
+        """S wallet not buying should NOT spontaneously infect even with rate=1."""
+        sa = StateAssigner(spontaneous_infection_rate=1.0)
+
+        G = nx.Graph()
+        G.add_node(1)
+
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.SUSCEPTIBLE,
+            is_buying=False,
+            G=G,
+            infected_wallets=set(),
+            current_time=datetime(2017, 10, 1),
+        )
+        assert new_state == State.SUSCEPTIBLE
+
+    def test_neighbor_infection_takes_priority(self):
+        """S wallet with infected neighbor uses normal path, not spontaneous."""
+        sa = StateAssigner(spontaneous_infection_rate=0.0)
+
+        G = nx.Graph()
+        G.add_edges_from([(1, 2)])
+
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.SUSCEPTIBLE,
+            is_buying=True,
+            G=G,
+            infected_wallets={2},
+            current_time=datetime(2017, 10, 1),
+        )
+        # Has infected neighbor and is buying -> I (normal path)
+        assert new_state == State.INFECTED
+
+    def test_default_spontaneous_rate(self):
+        """Default spontaneous infection rate should be 0.001."""
+        sa = StateAssigner()
+        assert sa.spontaneous_infection_rate == 0.001
+
+    def test_default_exposure_timeout(self):
+        """Default exposure timeout should be 14 days."""
+        sa = StateAssigner()
+        assert sa.exposure_timeout_days == 14
+
+
+class TestExposureStartTracking:
+    """Test that exposure start times are recorded on S->E transitions."""
+
+    def test_s_to_e_records_exposure_start(self):
+        """S->E transition should record the exposure start time."""
+        sa = StateAssigner()
+        G = nx.Graph()
+        G.add_edges_from([(1, 2)])
+
+        current_time = datetime(2017, 10, 5)
+        new_state = sa._compute_new_state(
+            wallet=1,
+            prev_state=State.SUSCEPTIBLE,
+            is_buying=False,
+            G=G,
+            infected_wallets={2},
+            current_time=current_time,
+        )
+        assert new_state == State.EXPOSED
+        assert sa.exposure_start_times[1] == current_time
+
+    def test_reset_clears_exposure_start_times(self):
+        """Reset should clear exposure_start_times."""
+        sa = StateAssigner()
+        sa.exposure_start_times[1] = datetime(2017, 10, 1)
+        sa.reset()
+        assert len(sa.exposure_start_times) == 0
 
 
 if __name__ == "__main__":

@@ -27,29 +27,46 @@ from src.state_engine.state_assigner import State
 from src.estimation.estimator import EstimationResult
 from src.hypothesis.hypothesis_tester import HypothesisResult
 from src.utils.logger import get_logger
+from src.visualization.publication_style import apply_style
 
 
-# Publication-quality settings
-plt.rcParams.update({
-    'font.size': 12,
-    'axes.labelsize': 14,
-    'axes.titlesize': 16,
-    'legend.fontsize': 11,
-    'xtick.labelsize': 11,
-    'ytick.labelsize': 11,
-    'figure.dpi': 150,
-    'savefig.dpi': 300,
-    'savefig.bbox': 'tight',
-    'lines.linewidth': 2,
-})
+# Apply publication style (reads config; falls back gracefully)
+apply_style()
 
-# Color palette for states
-STATE_COLORS = {
+# Default color palette for states
+_DEFAULT_STATE_COLORS: Dict[str, str] = {
     'S': '#2E86AB',  # Blue - Susceptible
     'E': '#F6AE2D',  # Orange - Exposed
     'I': '#E94F37',  # Red - Infected
     'R': '#7FB069',  # Green - Recovered
 }
+
+
+def _load_state_colors() -> Dict[str, str]:
+    """Load state colors from config, falling back to defaults."""
+    try:
+        from src.utils.config_manager import ConfigManager
+        cm = ConfigManager()
+        config = cm.get_all()
+        viz_colors = config.get('visualization', {}).get('colors', {})
+        if viz_colors:
+            mapping = {
+                'susceptible': 'S',
+                'exposed': 'E',
+                'infected': 'I',
+                'recovered': 'R',
+            }
+            colors = dict(_DEFAULT_STATE_COLORS)
+            for cfg_key, state_key in mapping.items():
+                if cfg_key in viz_colors:
+                    colors[state_key] = viz_colors[cfg_key]
+            return colors
+    except Exception:
+        pass
+    return dict(_DEFAULT_STATE_COLORS)
+
+
+STATE_COLORS: Dict[str, str] = _load_state_colors()
 
 
 class SEIRVisualizer:

@@ -32,6 +32,7 @@ env/
 # IDE
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 
@@ -52,3 +53,14 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Results
+results/
+
+# Stderr captures
+pipe_stderr.txt
+stderr.txt
+test_stderr.txt
+
+# Git worktrees
+.worktrees/

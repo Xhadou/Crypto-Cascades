@@ -235,5 +235,418 @@ class TestStatisticalValidity:
             assert result.reject_null == False
 
 
+class TestH2NullModel:
+    """Tests for H2 null model comparison (replacing trivial >1 test)."""
+
+    @pytest.fixture
+    def tester(self):
+        return HypothesisTester(alpha=0.05, random_seed=42)
+
+    @pytest.fixture
+    def test_params(self):
+        return EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.8)
+
+    def test_h2_compares_against_null_models(self, tester, test_params):
+        """H2 should test network factor against null models, not against 1."""
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params)
+        # Result should contain null model comparison info
+        assert 'null_model_factors' in result.additional_metrics
+        assert 'observed_vs_null_p' in result.additional_metrics
+
+    def test_h2_null_model_p_value_used(self, tester, test_params):
+        """H2 p-value should come from null model comparison, not bootstrap >1."""
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params)
+        # The p-value should equal the null model comparison p-value
+        assert result.p_value == result.additional_metrics['observed_vs_null_p']
+
+    def test_h2_regular_graph_not_significant(self, tester, test_params):
+        """A k-regular graph should NOT show significant amplification vs
+        configuration-model null networks.
+
+        A regular graph has uniform degree distribution, so the configuration
+        model null (which preserves the degree sequence) should produce very
+        similar network factors. The test should not reject.
+        """
+        G = nx.random_regular_graph(6, 200, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params, n_null=200)
+        # For a regular graph the observed factor should be close to the null
+        # distribution, so the effect size should be small.
+        assert result.additional_metrics['n_null_models'] > 0
+        # The null factors should be close to observed (within reason)
+        null_mean = result.additional_metrics['null_model_mean']
+        observed = result.additional_metrics['network_factor']
+        # Relative difference should be small (< 5%)
+        assert abs(observed - null_mean) / observed < 0.05
+
+    def test_h2_null_model_factors_list(self, tester, test_params):
+        """null_model_factors should be a non-empty list of floats."""
+        G = nx.barabasi_albert_graph(100, 3, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params)
+        factors = result.additional_metrics['null_model_factors']
+        assert isinstance(factors, list)
+        assert len(factors) > 0
+        assert all(isinstance(f, float) for f in factors)
+
+    def test_h2_network_factor_still_in_metrics(self, tester, test_params):
+        """The observed network factor should still be reported."""
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        result = tester.test_h2_network_amplification(G, test_params)
+        assert 'network_factor' in result.additional_metrics
+        assert result.additional_metrics['network_factor'] > 1
+
+
+class TestVuongTest:
+    """Tests for Vuong test replacing fabricated H1 p-value."""
+
+    def test_vuong_returns_real_p_value(self):
+        """H1 p-value should be computed, not hard-coded."""
+        from src.hypothesis.hypothesis_tester import HypothesisTester
+        from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
+        from src.estimation.estimator import EstimationResult
+
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        observed = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est_params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.85)
+        result = tester.test_h1_epidemic_dynamics(
+            state_history=observed,
+            estimated_params=est_params,
+            observed_data=observed,
+        )
+        # p-value must NOT be exactly 0.01 or 0.5 (the old hard-coded values)
+        assert result.p_value not in (0.01, 0.5)
+        assert 0 <= result.p_value <= 1
+
+    def test_vuong_h1_confidence_interval_is_statistical(self):
+        """H1 CI should not be R^2 +/- 0.1."""
+        from src.hypothesis.hypothesis_tester import HypothesisTester
+        from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
+        from src.estimation.estimator import EstimationResult
+
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        observed = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est_params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.85)
+        result = tester.test_h1_epidemic_dynamics(
+            state_history=observed,
+            estimated_params=est_params,
+            observed_data=observed,
+        )
+        lo, hi = result.confidence_interval
+        # CI width should not be exactly 0.2 (the old +/-0.1)
+        assert abs(hi - lo - 0.2) > 0.001
+
+    def test_vuong_test_statistic_stored(self):
+        """The Vuong test statistic should be stored in additional_metrics."""
+        from src.hypothesis.hypothesis_tester import HypothesisTester
+        from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
+        from src.estimation.estimator import EstimationResult
+
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        observed = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est_params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.85)
+        result = tester.test_h1_epidemic_dynamics(
+            state_history=observed,
+            estimated_params=est_params,
+            observed_data=observed,
+        )
+        assert 'vuong_statistic' in result.additional_metrics
+        assert isinstance(result.additional_metrics['vuong_statistic'], float)
+
+    def test_vuong_seir_r2_in_additional_metrics(self):
+        """R^2 should still be available in additional_metrics for reference."""
+        from src.hypothesis.hypothesis_tester import HypothesisTester
+        from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
+        from src.estimation.estimator import EstimationResult
+
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(params, random_seed=42)
+        observed = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est_params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.85)
+        result = tester.test_h1_epidemic_dynamics(
+            state_history=observed,
+            estimated_params=est_params,
+            observed_data=observed,
+        )
+        assert 'seir_r_squared' in result.additional_metrics
+
+
+class TestH3OneTailed:
+    """Tests for H3 one-tailed p-value fix."""
+
+    def test_h3_uses_one_tailed_p(self):
+        """H3 should use one-tailed p-value, not two-tailed with direction check."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        np.random.seed(42)
+        fgi = np.linspace(30, 80, 50)
+        infections = fgi * 0.5 + np.random.normal(0, 2, 50)
+
+        state_history = pd.DataFrame({
+            't': range(50),
+            'I': infections
+        })
+
+        result = tester.test_h3_fgi_correlation(state_history, fgi)
+        assert result.additional_metrics.get('one_tailed', False)
+
+    def test_h3_one_tailed_p_smaller_for_positive_corr(self):
+        """One-tailed p should be half of two-tailed when correlation is positive."""
+        from scipy.stats import spearmanr
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        np.random.seed(42)
+        fgi = np.linspace(30, 80, 50)
+        infections = fgi * 0.5 + np.random.normal(0, 2, 50)
+
+        state_history = pd.DataFrame({
+            't': range(50),
+            'I': infections
+        })
+
+        result = tester.test_h3_fgi_correlation(state_history, fgi)
+        # For positive correlation, one-tailed p = two-tailed p / 2
+        # So it should be less than or equal to the two-tailed p
+        two_tailed_p = result.additional_metrics.get('two_tailed_p_value')
+        assert two_tailed_p is not None
+        assert result.p_value <= two_tailed_p
+
+    def test_h3_negative_corr_not_significant(self):
+        """Negative correlation should not be significant for one-tailed test."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        np.random.seed(42)
+        fgi = np.linspace(30, 80, 50)
+        infections = -fgi * 0.5 + np.random.normal(0, 2, 50)  # Negative correlation
+
+        state_history = pd.DataFrame({
+            't': range(50),
+            'I': infections
+        })
+
+        result = tester.test_h3_fgi_correlation(state_history, fgi)
+        # One-tailed p for wrong direction should be > 0.5
+        assert result.p_value > 0.5
+        assert not result.reject_null
+
+
+class TestH6Permutation:
+    """Tests for H6 permutation test for small-n R0 comparison."""
+
+    @pytest.fixture
+    def tester(self):
+        return HypothesisTester(alpha=0.05, random_seed=42)
+
+    def test_h6_uses_permutation_for_small_n(self, tester):
+        """H6 with small n should use permutation test."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[2.5, 3.1],
+            r0_bear_market=1.2
+        )
+        assert 'permutation_p_value' in result.additional_metrics
+
+    def test_h6_permutation_p_value_in_range(self, tester):
+        """H6 permutation p-value should be in [0, 1]."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[2.5, 3.1],
+            r0_bear_market=1.2
+        )
+        p = result.additional_metrics.get('permutation_p_value', -1)
+        assert 0 <= p <= 1
+
+    def test_h6_permutation_p_is_primary(self, tester):
+        """For small-n, the primary p_value should be the permutation p-value."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[2.5, 3.1],
+            r0_bear_market=1.2
+        )
+        assert result.p_value == result.additional_metrics['permutation_p_value']
+
+    def test_h6_permutation_detects_clear_difference(self, tester):
+        """Permutation test should detect a large bull vs bear difference."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[5.0, 6.0],
+            r0_bear_market=0.5
+        )
+        # With a large gap, the permutation p-value should be small
+        assert result.additional_metrics['permutation_p_value'] < 0.5
+
+    def test_h6_permutation_with_single_bull(self, tester):
+        """Permutation test should work with a single bull market R0."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[3.0],
+            r0_bear_market=1.0
+        )
+        assert 'permutation_p_value' in result.additional_metrics
+        assert 0 <= result.additional_metrics['permutation_p_value'] <= 1
+
+    def test_h6_n_permutations_reported(self, tester):
+        """Number of permutations should be reported in additional_metrics."""
+        result = tester.test_h6_market_condition_r0(
+            r0_bull_markets=[2.5, 3.1],
+            r0_bear_market=1.2
+        )
+        assert 'n_permutations' in result.additional_metrics
+        assert result.additional_metrics['n_permutations'] >= 1000
+
+
+lifelines = pytest.importorskip("lifelines", reason="lifelines not installed")
+
+
+class TestH4Survival:
+    """Tests for H4 Cox proportional hazards survival analysis."""
+
+    def test_h4_uses_cox_model(self):
+        """H4 should use Cox PH model, not just rank correlation."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        # Higher degree -> earlier infection (negative correlation)
+        infection_times = {
+            n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
+            for n in list(G.nodes())[:100]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        assert 'hazard_ratio' in result.additional_metrics
+
+    def test_h4_hazard_ratio_greater_than_one(self):
+        """Higher degree should predict faster infection (HR > 1)."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        # Strong signal: higher degree -> much earlier infection
+        infection_times = {
+            n: max(200 - degrees[n] * 5 + np.random.normal(0, 2), 0.01)
+            for n in list(G.nodes())[:150]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        # Higher degree => earlier infection => higher hazard => HR > 1
+        assert result.additional_metrics['hazard_ratio'] > 1.0
+
+    def test_h4_cox_p_value_is_primary(self):
+        """When Cox PH succeeds, its p-value should be the primary p-value."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        infection_times = {
+            n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
+            for n in list(G.nodes())[:100]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        assert result.p_value == result.additional_metrics['cox_p_value']
+
+    def test_h4_mann_whitney_still_reported(self):
+        """Mann-Whitney U result should still be in additional_metrics."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        infection_times = {
+            n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
+            for n in list(G.nodes())[:100]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        assert 'mann_whitney_statistic' in result.additional_metrics
+        assert 'mann_whitney_p_value' in result.additional_metrics
+
+    def test_h4_cox_concordance_reported(self):
+        """Cox model concordance index should be reported."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        degrees = dict(G.degree())
+        np.random.seed(42)
+        infection_times = {
+            n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
+            for n in list(G.nodes())[:100]
+        }
+        infection_times_df = pd.DataFrame([
+            {'node': n, 'infection_time': t}
+            for n, t in infection_times.items()
+        ])
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+        result = tester.test_h4_centrality_effect(
+            G=G, state_history=state_history,
+            infection_times_df=infection_times_df
+        )
+        assert 'cox_concordance' in result.additional_metrics
+        # Concordance should be between 0 and 1
+        assert 0 <= result.additional_metrics['cox_concordance'] <= 1
+
+
+class TestH5Permutation:
+    """Tests for H5 permutation test fix."""
+
+    def test_h5_uses_permutation_test(self):
+        """H5 should use network permutation, not just chi-square."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+
+        # Create graph with clear community structure
+        G1 = nx.complete_graph(50)
+        G2 = nx.complete_graph(50)
+        G = nx.disjoint_union(G1, G2)
+        G.add_edge(0, 50)
+        G.add_edge(25, 75)
+
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+
+        result = tester.test_h5_community_clustering(G, state_history)
+        assert 'permutation_p_value' in result.additional_metrics
+
+    def test_h5_permutation_p_used_for_rejection(self):
+        """H5 rejection should be based on permutation p-value."""
+        tester = HypothesisTester(alpha=0.05, random_seed=42)
+
+        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
+
+        result = tester.test_h5_community_clustering(G, state_history)
+        perm_p = result.additional_metrics['permutation_p_value']
+        # The main p_value should be the permutation p-value
+        assert result.p_value == perm_p
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

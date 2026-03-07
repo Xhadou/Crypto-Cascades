@@ -11,7 +11,7 @@ Mathematical Model:
     dR/dt = γ × I - ω × R
 
 Where:
-    β_eff = β × (1 + α × (FGI - 50) / 50)  (FOMO factor)
+    β_eff = min(β × (1 + α × expit(k × (FGI - 50) / 50)), 0.99)  (sigmoidal FOMO)
     β = transmission rate
     σ = incubation rate (1/latent period)
     γ = recovery rate
@@ -22,7 +22,8 @@ Where:
 import numpy as np
 import pandas as pd
 import networkx as nx
-from scipy.integrate import odeint
+from scipy.integrate import solve_ivp
+from scipy.special import expit
 from typing import Dict, List, Optional, Tuple, Union, Callable, Any, Literal, overload
 from dataclasses import dataclass
 from enum import Enum
@@ -42,6 +43,7 @@ class SEIRParameters:
     
     # FOMO amplification
     fomo_alpha: float = 1.0   # FOMO sensitivity
+    fomo_k: float = 2.0       # Sigmoid steepness parameter
     fomo_enabled: bool = True
     
     def __post_init__(self):
@@ -57,19 +59,27 @@ class SEIRParameters:
     
     def effective_beta(self, fgi_value: float) -> float:
         """
-        Compute effective transmission rate with FOMO factor.
-        
+        Compute effective transmission rate with sigmoidal FOMO amplification.
+
+        Uses sigmoid (logistic) function for bounded, saturating response:
+            β_eff = min(β × (1 + α × expit(k × (FGI - 50) / 50)), 0.99)
+
+        The sigmoid provides:
+        - Natural saturation at extreme FGI values (no unbounded growth)
+        - β_eff is always in (0, 0.99] (valid probability)
+        - Smooth, differentiable transition centered at FGI=50
+
         Args:
             fgi_value: Fear & Greed Index (0-100)
-            
+
         Returns:
-            Effective β with FOMO amplification
+            Effective β with FOMO amplification, clamped to [0, 0.99]
         """
         if not self.fomo_enabled:
             return self.beta
-            
-        fomo_factor = 1.0 + self.fomo_alpha * (fgi_value - 50) / 50
-        return self.beta * max(0.1, fomo_factor)  # Ensure positive
+
+        fomo_factor = 1.0 + self.fomo_alpha * expit(self.fomo_k * (fgi_value - 50) / 50)
+        return min(self.beta * fomo_factor, 0.99)
 
 
 class NetworkSEIR:
@@ -95,8 +105,8 @@ class NetworkSEIR:
         """
         self.params = params or SEIRParameters()
         self.random_seed = random_seed
-        np.random.seed(random_seed)
-        
+        self.rng = np.random.default_rng(random_seed)
+
         self.logger = get_logger(__name__)
 
     def __getstate__(self):
@@ -112,8 +122,8 @@ class NetworkSEIR:
         
     def _seir_ode(
         self,
-        y: np.ndarray,
         t: float,
+        y: np.ndarray,
         N: int,
         beta: float,
         sigma: float,
@@ -121,17 +131,17 @@ class NetworkSEIR:
         omega: float
     ) -> List[float]:
         """
-        SEIR ODE system for scipy.integrate.odeint.
-        
+        SEIR ODE system for scipy.integrate.solve_ivp.
+
         Args:
-            y: State vector [S, E, I, R]
             t: Time
+            y: State vector [S, E, I, R]
             N: Total population
             beta: Effective transmission rate
             sigma: Incubation rate
             gamma: Recovery rate
             omega: Immunity waning rate
-            
+
         Returns:
             Derivatives [dS/dt, dE/dt, dI/dt, dR/dt]
         """
@@ -178,21 +188,51 @@ class NetworkSEIR:
         
         # Time points
         t = np.arange(0, t_max, dt)
-        
+
+        y0 = [S0, E0, I0, R0]
+
+        # Build ODE function with time-varying beta via closure
+        if fgi_values is not None:
+            def ode_func(t_val, y_val):
+                idx = min(int(t_val), len(fgi_values) - 1)
+                beta_eff = self.params.effective_beta(fgi_values[idx])
+                return self._seir_ode(
+                    t_val, y_val, N, beta_eff,
+                    self.params.sigma, self.params.gamma, self.params.omega
+                )
+        else:
+            def ode_func(t_val, y_val):
+                return self._seir_ode(
+                    t_val, y_val, N, self.params.beta,
+                    self.params.sigma, self.params.gamma, self.params.omega
+                )
+
+        # Solve the full ODE system in one call with RK45
+        sol = solve_ivp(
+            ode_func,
+            t_span=[t[0], t[-1]],
+            y0=y0,
+            method='RK45',
+            t_eval=t,
+            rtol=1e-8,
+            atol=1e-8
+        )
+
+        # Build results from sol.y (shape: 4 x len(t))
         results = []
-        y = [S0, E0, I0, R0]
-        
-        for i, ti in enumerate(t):
-            # Get effective beta
-            if fgi_values is not None and i < len(fgi_values):
-                beta_eff = self.params.effective_beta(fgi_values[i])
+        for i in range(len(sol.t)):
+            S, E, I, R = sol.y[:, i]
+            # Clamp to non-negative (numerical noise can push slightly below 0)
+            S, E, I, R = max(S, 0), max(E, 0), max(I, 0), max(R, 0)
+
+            if fgi_values is not None:
+                idx = min(int(sol.t[i]), len(fgi_values) - 1)
+                beta_eff = self.params.effective_beta(fgi_values[idx])
             else:
                 beta_eff = self.params.beta
-                
-            # Store current state
-            S, E, I, R = y
+
             results.append({
-                't': ti,
+                't': sol.t[i],
                 'S': S,
                 'E': E,
                 'I': I,
@@ -201,20 +241,9 @@ class NetworkSEIR:
                 'E_frac': E / N,
                 'I_frac': I / N,
                 'R_frac': R / N,
-                'beta_eff': beta_eff
+                'beta_eff': beta_eff,
             })
-            
-            # Integrate one step
-            if i < len(t) - 1:
-                t_span = [ti, t[i + 1]]
-                sol = odeint(
-                    self._seir_ode,
-                    y,
-                    t_span,
-                    args=(N, beta_eff, self.params.sigma, self.params.gamma, self.params.omega)
-                )
-                y = sol[-1]
-        
+
         return pd.DataFrame(results)
     
     def simulate_network_stochastic(
@@ -314,22 +343,22 @@ class NetworkSEIR:
             if degree > 0 and infected_neighbors > 0:
                 # Probability based on fraction of infected neighbors
                 p_expose = 1 - (1 - beta_eff) ** infected_neighbors
-                if np.random.random() < p_expose:
+                if self.rng.random() < p_expose:
                     return State.EXPOSED
-                    
+
         elif current_state == State.EXPOSED:
             # E -> I: Incubation ends
-            if np.random.random() < self.params.sigma:
+            if self.rng.random() < self.params.sigma:
                 return State.INFECTED
-                
+
         elif current_state == State.INFECTED:
             # I -> R: Recovery
-            if np.random.random() < self.params.gamma:
+            if self.rng.random() < self.params.gamma:
                 return State.RECOVERED
-                
+
         elif current_state == State.RECOVERED:
             # R -> S: Immunity waning
-            if np.random.random() < self.params.omega:
+            if self.rng.random() < self.params.omega:
                 return State.SUSCEPTIBLE
                 
         return current_state
@@ -406,7 +435,7 @@ class NetworkSEIR:
         # Bootstrap CI
         r0_samples = []
         for _ in range(n_bootstrap):
-            boot_degrees = np.random.choice(degrees, len(degrees), replace=True).tolist()
+            boot_degrees = self.rng.choice(degrees, len(degrees), replace=True).tolist()
             r0_samples.append(compute_r0_from_degrees(boot_degrees))
 
         ci = (float(np.percentile(r0_samples, 2.5)),
@@ -420,7 +449,9 @@ class NetworkSEIR:
         self,
         state_df: pd.DataFrame,
         window_size: int = 7,
-        method: str = 'ratio'
+        method: str = 'ratio',
+        serial_interval_mean: float = 7.0,
+        serial_interval_std: float = 3.5
     ) -> pd.DataFrame:
         """
         Estimate time-varying reproduction number R(t).
@@ -430,12 +461,131 @@ class NetworkSEIR:
             window_size: Rolling window size for estimation
             method: Estimation method:
                 - 'ratio': Simple ratio method (new infections / current infections)
+                - 'cori': Cori et al. (2013) method via epyestim (falls back to ratio)
+            serial_interval_mean: Mean serial interval for Cori method (days)
+            serial_interval_std: Std dev of serial interval for Cori method (days)
 
         Returns:
             DataFrame with columns [t, R_t, R_t_lower, R_t_upper]
         """
-        self.logger.info(f"Computing time-varying R₀ using {method} method...")
+        self.logger.info(f"Computing time-varying R(t) using {method} method...")
 
+        if method == 'cori':
+            cori_result = self._compute_rt_cori(
+                state_df, serial_interval_mean, serial_interval_std
+            )
+            if cori_result is not None:
+                return cori_result
+            self.logger.info("Cori method unavailable, falling back to ratio method")
+
+        return self._compute_rt_ratio(state_df, window_size)
+
+    def _compute_rt_cori(
+        self,
+        state_df: pd.DataFrame,
+        serial_interval_mean: float = 7.0,
+        serial_interval_std: float = 3.5
+    ) -> Optional[pd.DataFrame]:
+        """
+        Estimate R(t) using Cori et al. (2013) method via epyestim.
+
+        Args:
+            state_df: DataFrame with SEIR state counts over time
+            serial_interval_mean: Mean serial interval (days)
+            serial_interval_std: Std dev of serial interval (days)
+
+        Returns:
+            DataFrame with R(t) estimates, or None if epyestim is unavailable
+        """
+        try:
+            from epyestim import estimate_r
+        except ImportError:
+            self.logger.warning(
+                "epyestim not installed; Cori R(t) method unavailable. "
+                "Install with: pip install epyestim"
+            )
+            return None
+
+        # Extract I and R counts for proper incidence calculation
+        if 'I' in state_df.columns:
+            I = np.asarray(state_df['I'].values, dtype=float)
+            R = np.asarray(state_df['R'].values, dtype=float) if 'R' in state_df.columns else np.zeros(len(I))
+        elif 'I_frac' in state_df.columns:
+            N_assumed = 10000
+            I = np.asarray(state_df['I_frac'].values, dtype=float) * N_assumed
+            R = np.asarray(state_df['R_frac'].values, dtype=float) * N_assumed if 'R_frac' in state_df.columns else np.zeros(len(I))
+        else:
+            self.logger.error("Cannot find infection data in state_df")
+            return None
+
+        # Incidence = d(I+R)/dt ≈ σE (new infections entering I from E)
+        # Using diff(I) alone gives σE - γI which subtracts recoveries,
+        # biasing R(t) downward. diff(I+R) = σE - ωR ≈ σE when ω is small.
+        incidence = np.diff(I + R)
+        incidence = np.maximum(incidence, 0)
+
+        if incidence.sum() <= 0:
+            self.logger.warning("No incidence detected; cannot estimate R(t) via Cori method")
+            return None
+
+        # epyestim expects a pandas Series with DatetimeIndex
+        t_col = np.asarray(state_df['t'].values) if 't' in state_df.columns else np.arange(len(state_df))
+        dates = pd.date_range(start='2020-01-01', periods=len(incidence), freq='D')
+        incidence_series = pd.Series(incidence, index=dates, name='cases')
+
+        try:
+            rt_result = estimate_r(
+                incidence_series,
+                si_distr=None,
+                mean_si=serial_interval_mean,
+                std_si=serial_interval_std,
+            )
+
+            # Build output DataFrame consistent with ratio method format
+            result_df = pd.DataFrame({
+                't': t_col[1:len(rt_result) + 1] if len(t_col) > len(rt_result) else np.arange(len(rt_result)),
+                'R_t': rt_result['R_mean'].values if 'R_mean' in rt_result.columns else rt_result.iloc[:, 0].values,
+            })
+
+            # Add CI columns if available
+            if 'R_q0.025' in rt_result.columns:
+                result_df['R_t_lower'] = rt_result['R_q0.025'].values
+            elif 'Q0.025' in rt_result.columns:
+                result_df['R_t_lower'] = rt_result['Q0.025'].values
+
+            if 'R_q0.975' in rt_result.columns:
+                result_df['R_t_upper'] = rt_result['R_q0.975'].values
+            elif 'Q0.975' in rt_result.columns:
+                result_df['R_t_upper'] = rt_result['Q0.975'].values
+
+            valid_rt = result_df['R_t'].dropna()
+            if len(valid_rt) > 0:
+                self.logger.info(
+                    f"Cori R(t) range: [{valid_rt.min():.2f}, {valid_rt.max():.2f}], "
+                    f"mean: {valid_rt.mean():.2f}"
+                )
+
+            return result_df
+
+        except Exception as e:
+            self.logger.warning(f"Cori R(t) estimation failed: {e}")
+            return None
+
+    def _compute_rt_ratio(
+        self,
+        state_df: pd.DataFrame,
+        window_size: int = 7
+    ) -> pd.DataFrame:
+        """
+        Estimate R(t) using simple ratio method.
+
+        Args:
+            state_df: DataFrame with SEIR state counts over time
+            window_size: Rolling window size for estimation
+
+        Returns:
+            DataFrame with columns [t, R_t, R_t_adjusted, R_t_lower, R_t_upper, ...]
+        """
         results = []
 
         # Extract data
@@ -458,71 +608,70 @@ class NetworkSEIR:
         new_infections = np.diff(E + I)
         new_infections = np.maximum(new_infections, 0)  # Can't be negative
 
-        if method == 'ratio':
-            # Simple ratio method
-            for i in range(window_size, len(state_df)):
-                window_start = i - window_size
+        # Simple ratio method
+        for i in range(window_size, len(state_df)):
+            window_start = i - window_size
 
-                # Current infected in window
-                I_window = I[window_start:i]
-                I_mean = np.mean(I_window)
+            # Current infected in window
+            I_window = I[window_start:i]
+            I_mean = np.mean(I_window)
 
-                # New infections in window
-                if i <= len(new_infections):
-                    new_inf_window = new_infections[window_start:min(i, len(new_infections))]
-                    new_inf_sum = np.sum(new_inf_window)
+            # New infections in window
+            if i <= len(new_infections):
+                new_inf_window = new_infections[window_start:min(i, len(new_infections))]
+                new_inf_sum = np.sum(new_inf_window)
+            else:
+                new_inf_sum = 0
+
+            # Susceptible fraction for adjustment
+            S_frac = S[i] / (S[i] + E[i] + I[i] + 1e-10)
+
+            if I_mean > 0 and S_frac > 0:
+                # R_t ~ (new infections per time) / (gamma * I) * (N / S)
+                # Simplified: R_t ~ (new_inf / I) * (1 / S_frac)
+                R_t = (new_inf_sum / window_size) / (self.params.gamma * I_mean)
+                # Adjust for susceptible depletion
+                R_t_adjusted = R_t / S_frac if S_frac > 0.1 else R_t
+            else:
+                R_t = np.nan
+                R_t_adjusted = np.nan
+
+            # Bootstrap CI - align arrays before bootstrapping
+            if I_mean > 0 and len(I_window) > 0 and len(new_inf_window) > 0:
+                # Align arrays to the same length to avoid index bias
+                min_len = min(len(I_window), len(new_inf_window))
+                if min_len < 2:
+                    R_t_lower = R_t_upper = R_t
                 else:
-                    new_inf_sum = 0
+                    I_aligned = I_window[:min_len]
+                    new_inf_aligned = new_inf_window[:min_len]
 
-                # Susceptible fraction for adjustment
-                S_frac = S[i] / (S[i] + E[i] + I[i] + 1e-10)
+                    R_t_samples = []
+                    for _ in range(100):
+                        boot_idx = self.rng.choice(min_len, min_len, replace=True)
+                        boot_I = np.mean(I_aligned[boot_idx])
+                        boot_new = np.sum(new_inf_aligned[boot_idx])
+                        if boot_I > 0:
+                            R_t_samples.append((boot_new / window_size) / (self.params.gamma * boot_I))
 
-                if I_mean > 0 and S_frac > 0:
-                    # R_t ≈ (new infections per time) / (gamma * I) * (N / S)
-                    # Simplified: R_t ≈ (new_inf / I) * (1 / S_frac)
-                    R_t = (new_inf_sum / window_size) / (self.params.gamma * I_mean)
-                    # Adjust for susceptible depletion
-                    R_t_adjusted = R_t / S_frac if S_frac > 0.1 else R_t
-                else:
-                    R_t = np.nan
-                    R_t_adjusted = np.nan
-
-                # Bootstrap CI - align arrays before bootstrapping
-                if I_mean > 0 and len(I_window) > 0 and len(new_inf_window) > 0:
-                    # Align arrays to the same length to avoid index bias
-                    min_len = min(len(I_window), len(new_inf_window))
-                    if min_len < 2:
-                        R_t_lower = R_t_upper = R_t
+                    if R_t_samples:
+                        R_t_lower = np.percentile(R_t_samples, 2.5)
+                        R_t_upper = np.percentile(R_t_samples, 97.5)
                     else:
-                        I_aligned = I_window[:min_len]
-                        new_inf_aligned = new_inf_window[:min_len]
+                        R_t_lower = R_t_upper = R_t
+            else:
+                R_t_lower = R_t_upper = np.nan
 
-                        R_t_samples = []
-                        for _ in range(100):
-                            boot_idx = np.random.choice(min_len, min_len, replace=True)
-                            boot_I = np.mean(I_aligned[boot_idx])
-                            boot_new = np.sum(new_inf_aligned[boot_idx])
-                            if boot_I > 0:
-                                R_t_samples.append((boot_new / window_size) / (self.params.gamma * boot_I))
-
-                        if R_t_samples:
-                            R_t_lower = np.percentile(R_t_samples, 2.5)
-                            R_t_upper = np.percentile(R_t_samples, 97.5)
-                        else:
-                            R_t_lower = R_t_upper = R_t
-                else:
-                    R_t_lower = R_t_upper = np.nan
-
-                results.append({
-                    't': t[i],
-                    'R_t': R_t,
-                    'R_t_adjusted': R_t_adjusted,
-                    'R_t_lower': R_t_lower,
-                    'R_t_upper': R_t_upper,
-                    'I': I[i],
-                    'S_frac': S_frac,
-                    'new_infections': new_inf_sum / window_size
-                })
+            results.append({
+                't': t[i],
+                'R_t': R_t,
+                'R_t_adjusted': R_t_adjusted,
+                'R_t_lower': R_t_lower,
+                'R_t_upper': R_t_upper,
+                'I': I[i],
+                'S_frac': S_frac,
+                'new_infections': new_inf_sum / window_size
+            })
 
         df = pd.DataFrame(results)
 
@@ -654,14 +803,14 @@ class NetworkSEIR:
                 break
 
             # Time to next event (exponential distribution)
-            dt = np.random.exponential(1.0 / total_rate)
+            dt = self.rng.exponential(1.0 / total_rate)
             t += dt
 
             if t > t_max:
                 break
 
             # Choose which event occurs
-            rand = np.random.random() * total_rate
+            rand = self.rng.random() * total_rate
 
             if rand < exposure_rate:
                 # Exposure event: choose which S node
@@ -678,7 +827,7 @@ class NetworkSEIR:
             elif rand < exposure_rate + infection_rate:
                 # Infection event: random E node becomes I
                 if E_nodes:
-                    node = np.random.choice(list(E_nodes))
+                    node = self.rng.choice(list(E_nodes))
                     E_nodes.remove(node)
                     I_nodes.add(node)
                     node_states[node] = State.INFECTED
@@ -686,7 +835,7 @@ class NetworkSEIR:
             elif rand < exposure_rate + infection_rate + recovery_rate:
                 # Recovery event: random I node becomes R
                 if I_nodes:
-                    node = np.random.choice(list(I_nodes))
+                    node = self.rng.choice(list(I_nodes))
                     I_nodes.remove(node)
                     R_nodes.add(node)
                     node_states[node] = State.RECOVERED
@@ -694,7 +843,7 @@ class NetworkSEIR:
             else:
                 # Immunity waning: random R node becomes S
                 if R_nodes:
-                    node = np.random.choice(list(R_nodes))
+                    node = self.rng.choice(list(R_nodes))
                     R_nodes.remove(node)
                     S_nodes.add(node)
                     node_states[node] = State.SUSCEPTIBLE
@@ -766,25 +915,37 @@ class NetworkSEIR:
             Dict with mean, std, and percentiles for each state
         """
         self.logger.info(f"Running {n_simulations} Monte Carlo simulations...")
-        
+
         all_results = []
         nodes = list(G.nodes())
-        
+
+        # Spawn independent child seeds for each run
+        from numpy.random import SeedSequence
+        ss = SeedSequence(self.random_seed)
+        child_seeds = ss.spawn(n_simulations)
+
         for i in range(n_simulations):
-            # Random initial infected
-            np.random.seed(self.random_seed + i)
-            initial_infected = np.random.choice(
-                nodes, 
+            # Each run gets its own RNG from a spawned seed
+            run_rng = np.random.default_rng(child_seeds[i])
+            initial_infected = run_rng.choice(
+                nodes,
                 size=min(initial_infected_count, len(nodes)),
                 replace=False
             ).tolist()
-            
+
+            # Temporarily swap in per-run RNG for stochastic simulation
+            saved_rng = self.rng
+            self.rng = run_rng
+
             # Run simulation
             df = self.simulate_network_stochastic(
                 G, initial_infected, t_max, fgi_values
             )
             df['run'] = i
             all_results.append(df)
+
+            # Restore original RNG
+            self.rng = saved_rng
             
         # Combine results
         combined = pd.concat(all_results, ignore_index=True)
@@ -818,29 +979,40 @@ class NetworkSEIR:
     ) -> pd.DataFrame:
         """
         Execute a single Monte Carlo simulation (picklable for multiprocessing).
-        
+
         Args:
             G: NetworkX graph
             initial_infected_count: Number of initial infected
             t_max: Maximum time
             fgi_values: Fear & Greed Index values
             run_idx: Index for random seed offset
-            
+
         Returns:
             DataFrame with simulation results for this run
         """
+        from numpy.random import SeedSequence
         nodes = list(G.nodes())
-        np.random.seed(self.random_seed + run_idx)
-        initial_infected = np.random.choice(
+        # Create a deterministic child seed for this run
+        ss = SeedSequence(self.random_seed)
+        child_seed = ss.spawn(run_idx + 1)[run_idx]
+        run_rng = np.random.default_rng(child_seed)
+
+        initial_infected = run_rng.choice(
             nodes,
             size=min(initial_infected_count, len(nodes)),
             replace=False
         ).tolist()
-        
+
+        # Use per-run RNG for stochastic simulation
+        saved_rng = self.rng
+        self.rng = run_rng
+
         df = self.simulate_network_stochastic(
             G, initial_infected, t_max, fgi_values
         )
         df['run'] = run_idx
+
+        self.rng = saved_rng
         return df
 
     def run_monte_carlo_parallel(

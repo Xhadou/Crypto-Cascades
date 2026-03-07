@@ -57,6 +57,10 @@ class ModelComparison:
         ll = -n / 2 * (1 + np.log(2 * np.pi * sigma2))
 
         aic = 2 * n_params - 2 * ll
+        if n > n_params + 1:
+            aicc = aic + 2 * n_params * (n_params + 1) / (n - n_params - 1)
+        else:
+            aicc = np.inf
         bic = n_params * np.log(n) - 2 * ll
 
         # R² and adjusted R²
@@ -68,6 +72,7 @@ class ModelComparison:
 
         return {
             'aic': float(aic),
+            'aicc': float(aicc),
             'bic': float(bic),
             'r_squared': float(r2),
             'r_squared_adj': float(r2_adj),

@@ -67,8 +67,8 @@ class HypothesisTester:
         """
         self.alpha = alpha
         self.random_seed = random_seed
-        np.random.seed(random_seed)
-        
+        self.rng = np.random.default_rng(random_seed)
+
         self.logger = get_logger(__name__)
         
     def test_all(
@@ -252,33 +252,50 @@ class HypothesisTester:
         self.logger.info("Testing H6: R₀ differs between bull and bear markets...")
         
         bull_array = np.array(r0_bull_markets)
-        
-        # If we only have one or two bull market R0s, use different approach
+
+        # If we only have one or two bull market R0s, use permutation test
+        # (exact for tiny n, no distributional assumptions needed)
         if len(bull_array) < 3:
-            # Use simple comparison with bootstrap CI
             mean_bull = np.mean(bull_array)
-            diff = mean_bull - r0_bear_market
-            
-            # Bootstrap for CI
+            observed_diff = mean_bull - r0_bear_market
+
+            # Pool all R0 values and permute group labels
+            all_r0 = list(r0_bull_markets) + [r0_bear_market]
+            n_bull = len(r0_bull_markets)
+
+            n_perms = 10000
+            rng = np.random.default_rng(self.random_seed)
+            perm_diffs = []
+            for _ in range(n_perms):
+                shuffled = all_r0.copy()
+                rng.shuffle(shuffled)
+                perm_bull_mean = np.mean(shuffled[:n_bull])
+                perm_bear_mean = np.mean(shuffled[n_bull:])
+                perm_diffs.append(perm_bull_mean - perm_bear_mean)
+
+            # One-tailed: proportion of permutations where diff >= observed
+            p_value = float(np.mean([d >= observed_diff for d in perm_diffs]))
+            t_stat = observed_diff / (np.std(perm_diffs) + 1e-10)
+
+            # Effect size (standardized difference)
+            if len(bull_array) > 1 and np.std(bull_array) > 0:
+                effect_size = observed_diff / np.std(bull_array)
+            else:
+                effect_size = observed_diff  # Raw difference if can't standardize
+
+            # Bootstrap CI for the difference
             n_bootstrap = 1000
             bootstrap_diffs = []
             for _ in range(n_bootstrap):
-                boot_bulls = np.random.choice(bull_array, size=len(bull_array), replace=True)
+                boot_bulls = rng.choice(bull_array, size=len(bull_array), replace=True)
                 bootstrap_diffs.append(np.mean(boot_bulls) - r0_bear_market)
-            
+
             ci_lower = np.percentile(bootstrap_diffs, 2.5)
             ci_upper = np.percentile(bootstrap_diffs, 97.5)
-            
-            # Effect size (standardized difference)
-            if len(bull_array) > 1 and np.std(bull_array) > 0:
-                effect_size = diff / np.std(bull_array)
-            else:
-                effect_size = diff  # Raw difference if can't standardize
-            
-            # P-value approximation from bootstrap
-            p_value = np.mean(np.array(bootstrap_diffs) <= 0) if diff > 0 else np.mean(np.array(bootstrap_diffs) >= 0)
-            t_stat = diff / (np.std(bootstrap_diffs) + 1e-10)
-            
+
+            permutation_p_value = p_value
+            n_permutations = n_perms
+
         else:
             # Standard t-test with enough samples
             ttest_result = stats.ttest_1samp(bull_array, r0_bear_market)
@@ -295,15 +312,32 @@ class HypothesisTester:
             n_bootstrap = 1000
             bootstrap_diffs = []
             for _ in range(n_bootstrap):
-                boot_bulls = np.random.choice(bull_array, size=len(bull_array), replace=True)
+                boot_bulls = self.rng.choice(bull_array, size=len(bull_array), replace=True)
                 bootstrap_diffs.append(np.mean(boot_bulls) - r0_bear_market)
             
             ci_lower = np.percentile(bootstrap_diffs, 2.5)
             ci_upper = np.percentile(bootstrap_diffs, 97.5)
-        
+
+            permutation_p_value = None
+            n_permutations = 0
+
         mean_bull = np.mean(bull_array)
         reject_null = p_value < self.alpha and mean_bull > r0_bear_market
-        
+
+        metrics = {
+            'r0_bull_mean': mean_bull,
+            'r0_bull_values': list(bull_array),
+            'r0_bear': r0_bear_market,
+            'r0_difference': mean_bull - r0_bear_market,
+            'bull_above_threshold': mean_bull > 1,
+            'bear_below_threshold': r0_bear_market < 1,
+            'interpretation': f"Bull R₀ ({mean_bull:.2f}) vs Bear R₀ ({r0_bear_market:.2f})"
+        }
+
+        if permutation_p_value is not None:
+            metrics['permutation_p_value'] = permutation_p_value
+            metrics['n_permutations'] = n_permutations
+
         return HypothesisResult(
             hypothesis="H6",
             description="R₀ is higher during bull markets than bear markets",
@@ -314,15 +348,7 @@ class HypothesisTester:
             reject_null=bool(reject_null),
             alpha=self.alpha,
             sample_size=len(bull_array) + 1,
-            additional_metrics={
-                'r0_bull_mean': mean_bull,
-                'r0_bull_values': list(bull_array),
-                'r0_bear': r0_bear_market,
-                'r0_difference': mean_bull - r0_bear_market,
-                'bull_above_threshold': mean_bull > 1,
-                'bear_below_threshold': r0_bear_market < 1,
-                'interpretation': f"Bull R₀ ({mean_bull:.2f}) vs Bear R₀ ({r0_bear_market:.2f})"
-            }
+            additional_metrics=metrics
         )
 
     def test_h1_epidemic_dynamics(
@@ -346,7 +372,6 @@ class HypothesisTester:
         self.logger.info("Testing H1: FOMO follows epidemic dynamics...")
 
         from scipy.optimize import curve_fit
-        from scipy.stats import chi2
 
         # Get observed infected fraction over time
         if observed_data is not None and 'I_frac' in observed_data.columns:
@@ -390,17 +415,17 @@ class HypothesisTester:
             I_seir = seir_sim['I_frac'].values[:len(t)]
             seir_residuals = I_obs - I_seir
             seir_sse = np.sum(seir_residuals**2)
-            seir_aic = self._compute_aic(seir_sse, n_params=3, n_obs=len(t))
+            seir_aicc = self._compute_aicc(seir_sse, n_params=4, n_obs=len(t))
             model_results['SEIR'] = {
                 'sse': seir_sse,
-                'aic': seir_aic,
-                'n_params': 3,
+                'aicc': seir_aicc,
+                'n_params': 4,
                 'fitted': I_seir
             }
             fitting_diagnostics['SEIR'] = {'status': 'success', 'sse': float(seir_sse)}
         except Exception as e:
             self.logger.warning(f"SEIR fitting failed: {e}")
-            model_results['SEIR'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 3}
+            model_results['SEIR'] = {'sse': np.inf, 'aicc': np.inf, 'n_params': 3}
             fitting_diagnostics['SEIR'] = {'status': 'failed', 'error': str(e)}
 
         # --- Model 2: Exponential growth ---
@@ -413,12 +438,12 @@ class HypothesisTester:
                                bounds=([0, -1], [1, 1]), maxfev=5000)
             I_exp = exponential(t, *popt)
             exp_sse = np.sum((I_obs - I_exp)**2)
-            exp_aic = self._compute_aic(exp_sse, n_params=2, n_obs=len(t))
-            model_results['Exponential'] = {'sse': exp_sse, 'aic': exp_aic, 'n_params': 2}
+            exp_aicc = self._compute_aicc(exp_sse, n_params=2, n_obs=len(t))
+            model_results['Exponential'] = {'sse': exp_sse, 'aicc': exp_aicc, 'n_params': 2, 'fitted': I_exp}
             fitting_diagnostics['Exponential'] = {'status': 'success', 'sse': float(exp_sse)}
         except Exception as e:
             self.logger.warning(f"Exponential fitting failed: {e}")
-            model_results['Exponential'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 2}
+            model_results['Exponential'] = {'sse': np.inf, 'aicc': np.inf, 'n_params': 2}
             fitting_diagnostics['Exponential'] = {'status': 'failed', 'error': str(e)}
 
         # --- Model 3: Logistic growth ---
@@ -431,12 +456,12 @@ class HypothesisTester:
                                bounds=([0, 0, 0], [1, 10, t.max()*2]), maxfev=5000)
             I_log = logistic(t, *popt)
             log_sse = np.sum((I_obs - I_log)**2)
-            log_aic = self._compute_aic(log_sse, n_params=3, n_obs=len(t))
-            model_results['Logistic'] = {'sse': log_sse, 'aic': log_aic, 'n_params': 3}
+            log_aicc = self._compute_aicc(log_sse, n_params=3, n_obs=len(t))
+            model_results['Logistic'] = {'sse': log_sse, 'aicc': log_aicc, 'n_params': 3, 'fitted': I_log}
             fitting_diagnostics['Logistic'] = {'status': 'success', 'sse': float(log_sse)}
         except Exception as e:
             self.logger.warning(f"Logistic fitting failed: {e}")
-            model_results['Logistic'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 3}
+            model_results['Logistic'] = {'sse': np.inf, 'aicc': np.inf, 'n_params': 3}
             fitting_diagnostics['Logistic'] = {'status': 'failed', 'error': str(e)}
 
         # --- Model 4: Linear growth ---
@@ -447,74 +472,124 @@ class HypothesisTester:
             popt, _ = curve_fit(linear, t, I_obs, maxfev=5000)
             I_lin = linear(t, *popt)
             lin_sse = np.sum((I_obs - I_lin)**2)
-            lin_aic = self._compute_aic(lin_sse, n_params=2, n_obs=len(t))
-            model_results['Linear'] = {'sse': lin_sse, 'aic': lin_aic, 'n_params': 2}
+            lin_aicc = self._compute_aicc(lin_sse, n_params=2, n_obs=len(t))
+            model_results['Linear'] = {'sse': lin_sse, 'aicc': lin_aicc, 'n_params': 2, 'fitted': I_lin}
             fitting_diagnostics['Linear'] = {'status': 'success', 'sse': float(lin_sse)}
         except Exception as e:
             self.logger.warning(f"Linear fitting failed: {e}")
-            model_results['Linear'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 2}
+            model_results['Linear'] = {'sse': np.inf, 'aicc': np.inf, 'n_params': 2}
             fitting_diagnostics['Linear'] = {'status': 'failed', 'error': str(e)}
 
         # --- Compare models ---
-        valid_models = {k: v for k, v in model_results.items() if np.isfinite(v['aic'])}
+        valid_models = {k: v for k, v in model_results.items() if np.isfinite(v['aicc'])}
 
         if not valid_models or 'SEIR' not in valid_models:
             return self._inconclusive_result("H1", "Model fitting failed")
 
-        # Find best model by AIC
-        best_model = min(valid_models.keys(), key=lambda x: valid_models[x]['aic'])
-        seir_aic = valid_models['SEIR']['aic']
-        best_aic = valid_models[best_model]['aic']
+        # Find best model by AICc (small-sample corrected)
+        best_model = min(valid_models.keys(), key=lambda x: valid_models[x]['aicc'])
+        seir_aicc = valid_models['SEIR']['aicc']
+        best_aicc = valid_models[best_model]['aicc']
 
-        # Compute AIC weights (Akaike weights)
-        aic_values = [v['aic'] for v in valid_models.values()]
-        min_aic = min(aic_values)
-        delta_aic = {k: v['aic'] - min_aic for k, v in valid_models.items()}
-        exp_delta = {k: np.exp(-0.5 * d) for k, d in delta_aic.items()}
+        # Compute AICc weights (Akaike weights)
+        aicc_values = [v['aicc'] for v in valid_models.values()]
+        min_aicc = min(aicc_values)
+        delta_aicc = {k: v['aicc'] - min_aicc for k, v in valid_models.items()}
+        exp_delta = {k: np.exp(-0.5 * d) for k, d in delta_aicc.items()}
         sum_exp = sum(exp_delta.values())
-        aic_weights = {k: v / sum_exp for k, v in exp_delta.items()}
+        aicc_weights = {k: v / sum_exp for k, v in exp_delta.items()}
 
-        # SEIR is supported if it has highest AIC weight or delta_AIC < 2 from best
-        seir_delta_aic = seir_aic - best_aic
-        seir_supported = (best_model == 'SEIR') or (seir_delta_aic < 2)
+        # SEIR is supported if it has highest AICc weight or ΔAICc < 2 from best
+        seir_delta_aicc = seir_aicc - best_aicc
+        seir_supported = (best_model == 'SEIR') or (seir_delta_aicc < 2)
 
         # Compute R² for SEIR
         ss_tot = np.sum((I_obs - np.mean(I_obs))**2)
         seir_r2 = 1 - valid_models['SEIR']['sse'] / ss_tot if ss_tot > 0 else 0
 
-        # Effect size: difference in AIC weights between SEIR and next best
-        other_weights = [w for k, w in aic_weights.items() if k != 'SEIR']
-        effect_size = aic_weights.get('SEIR', 0) - max(other_weights) if other_weights else 0
+        # Effect size: difference in AICc weights between SEIR and next best
+        other_weights = [w for k, w in aicc_weights.items() if k != 'SEIR']
+        aicc_effect_size = aicc_weights.get('SEIR', 0) - max(other_weights) if other_weights else 0
 
-        # P-value approximation using likelihood ratio test (SEIR vs best alternative)
-        if best_model != 'SEIR' and best_model in valid_models:
-            # Likelihood ratio statistic
-            lr_stat = len(t) * np.log(valid_models[best_model]['sse'] / valid_models['SEIR']['sse']) if valid_models['SEIR']['sse'] > 0 else 0
-            df_diff = abs(valid_models['SEIR']['n_params'] - valid_models[best_model]['n_params'])
-            if df_diff > 0 and lr_stat > 0:
-                p_value = 1 - chi2.cdf(abs(lr_stat), df_diff)
+        # --- Vuong test for non-nested model comparison ---
+        # Find the best non-SEIR model that has fitted values
+        non_seir_with_fitted = [
+            (name, info) for name, info in valid_models.items()
+            if name != 'SEIR' and 'fitted' in info
+        ]
+
+        eps = 1e-10
+        n_obs = len(I_obs)
+
+        if non_seir_with_fitted:
+            # Pick the best alternative (lowest AICc among non-SEIR)
+            alt_name, alt_info = min(non_seir_with_fitted, key=lambda x: x[1]['aicc'])
+
+            # Per-observation squared residuals
+            seir_resid2 = (I_obs - valid_models['SEIR']['fitted'])**2
+            alt_resid2 = (I_obs - alt_info['fitted'])**2
+
+            # Per-observation log-likelihood ratio (Gaussian assumption)
+            # lr_i > 0 means SEIR fits observation i better
+            lr_i = 0.5 * (np.log(alt_resid2 + eps) - np.log(seir_resid2 + eps))
+
+            # Vuong test statistic: mean(lr_i) / (std(lr_i) / sqrt(n))
+            lr_std = np.std(lr_i, ddof=1)
+            if lr_std > eps:
+                vuong_stat = float(np.mean(lr_i) / (lr_std / np.sqrt(n_obs)))
             else:
-                p_value = 0.5 if seir_supported else 0.99
+                # If std is ~0, all observations agree; use sign of mean
+                vuong_stat = float(np.sign(np.mean(lr_i)) * 10.0)
+
+            # One-sided p-value: probability that SEIR is NOT better
+            p_value = float(1.0 - stats.norm.cdf(vuong_stat))
         else:
-            p_value = 0.01 if seir_supported else 0.5
+            # No alternative model with fitted values; fall back to AIC-based assessment
+            vuong_stat = float('nan')
+            # Use chi2 survival function on AICc difference as approximate p-value
+            p_value = float(np.exp(-0.5 * abs(seir_delta_aicc))) if seir_delta_aicc <= 0 else 0.5
+
+        # --- NRMSE-based confidence interval (replaces ad-hoc R^2 +/- 0.1) ---
+        seir_resid2 = (I_obs - valid_models['SEIR']['fitted'])**2
+        seir_rmse = np.sqrt(np.mean(seir_resid2))
+        obs_range = np.max(I_obs) - np.min(I_obs) + eps
+        nrmse = seir_rmse / obs_range
+
+        # Bootstrap NRMSE CI
+        nrmse_boots = []
+        rng = np.random.default_rng(self.random_seed)
+        for _ in range(500):
+            idx = rng.choice(n_obs, size=n_obs, replace=True)
+            boot_rmse = np.sqrt(np.mean(seir_resid2[idx]))
+            boot_nrmse = boot_rmse / obs_range
+            nrmse_boots.append(boot_nrmse)
+        ci_lo = float(np.percentile(nrmse_boots, 2.5))
+        ci_hi = float(np.percentile(nrmse_boots, 97.5))
+
+        # Use NRMSE as effect size (lower is better)
+        effect_size = float(nrmse)
 
         return HypothesisResult(
             hypothesis="H1",
             description="FOMO episodes follow SEIR epidemic dynamics (vs alternative models)",
-            test_statistic=seir_aic,
+            test_statistic=seir_aicc,
             p_value=float(p_value),
-            effect_size=float(effect_size),
-            confidence_interval=(float(seir_r2 - 0.1), float(min(1.0, seir_r2 + 0.1))),
-            reject_null=bool(seir_supported),
+            effect_size=effect_size,
+            confidence_interval=(ci_lo, ci_hi),
+            reject_null=bool(seir_supported and p_value < self.alpha),
             alpha=self.alpha,
             sample_size=len(t),
             additional_metrics={
-                'model_comparison': {k: {'aic': v['aic'], 'sse': v['sse']}
+                'model_comparison': {k: {'aicc': v['aicc'], 'sse': v['sse']}
                                     for k, v in valid_models.items()},
-                'aic_weights': aic_weights,
+                'aicc_weights': aicc_weights,
                 'best_model': best_model,
                 'seir_r_squared': seir_r2,
-                'seir_delta_aic': seir_delta_aic,
+                'seir_delta_aicc': seir_delta_aicc,
+                'vuong_statistic': float(vuong_stat) if not np.isnan(vuong_stat) else float('nan'),
+                'vuong_alternative': alt_name if non_seir_with_fitted else None,
+                'nrmse': float(nrmse),
+                'aicc_weight_effect_size': float(aicc_effect_size),
                 'fitting_diagnostics': fitting_diagnostics,
                 'data_quality': {
                     'n_observations': len(t),
@@ -522,7 +597,7 @@ class HypothesisTester:
                     'variance': float(np.var(I_obs)),
                     'range': (float(I_obs.min()), float(I_obs.max()))
                 },
-                'interpretation': f"SEIR {'is' if seir_supported else 'is NOT'} the best model (ΔAIC={seir_delta_aic:.2f})"
+                'interpretation': f"SEIR {'is' if seir_supported else 'is NOT'} the best model (ΔAICc={seir_delta_aicc:.2f}, Vuong p={p_value:.4f})"
             }
         )
 
@@ -532,6 +607,19 @@ class HypothesisTester:
             return np.inf
         # AIC = n*ln(SSE/n) + 2k
         return n_obs * np.log(sse / n_obs) + 2 * n_params
+
+    def _compute_aicc(self, sse: float, n_params: int, n_obs: int) -> float:
+        """Compute corrected Akaike Information Criterion (AICc).
+
+        AICc = AIC + 2k(k+1)/(n-k-1) where k=number of parameters,
+        n=number of observations. Returns inf when n <= k+1 (correction
+        is undefined).
+        """
+        aic = self._compute_aic(sse, n_params, n_obs)
+        if aic == np.inf or n_obs <= n_params + 1:
+            return np.inf
+        correction = 2 * n_params * (n_params + 1) / (n_obs - n_params - 1)
+        return aic + correction
 
     def _inconclusive_result(self, hypothesis: str, reason: str) -> HypothesisResult:
         """Return an inconclusive hypothesis result."""
@@ -667,65 +755,116 @@ class HypothesisTester:
     def test_h2_network_amplification(
         self,
         G: nx.Graph,
-        estimated_params: EstimationResult
+        estimated_params: EstimationResult,
+        n_null: int = 500
     ) -> HypothesisResult:
         """
-        H2: Network structure amplifies contagion.
-        
-        Test: Compare network R₀ to basic R₀.
-        Null hypothesis: Network factor = 1 (no amplification)
+        H2: Network structure amplifies contagion beyond what random topology predicts.
+
+        Test: Compare the observed network amplification factor (<k^2>/<k>) against
+        the distribution of the same statistic computed on configuration-model null
+        networks that preserve the degree sequence.
+
+        The old test compared <k^2>/<k> > 1, which is ALWAYS true by Jensen's
+        inequality for any non-degenerate graph. The new test asks whether the
+        observed topology produces a *higher* amplification factor than expected
+        from random graphs with the same degree sequence.
+
+        The configuration model preserves the exact degree sequence but randomizes
+        which nodes connect to which, destroying degree-degree correlations,
+        clustering, and community structure. If the observed network factor is
+        significantly higher than the null distribution, it indicates that the
+        network's higher-order structure (not just degree heterogeneity) amplifies
+        contagion.
+
+        Null hypothesis: Observed network factor is not greater than configuration-
+        model null expectation.
         """
-        self.logger.info("Testing H2: Network amplifies contagion...")
-        
-        # Compute network metrics
+        self.logger.info("Testing H2: Network amplifies contagion (null model comparison)...")
+
+        # Compute observed network metrics
         degree_view = G.degree()  # type: ignore[operator]
         degrees = [d for _, d in degree_view]
-        k_mean = np.mean(degrees)
-        k2_mean = np.mean([d**2 for d in degrees])
-        
+        n_nodes = len(degrees)
+        k_mean = float(np.mean(degrees))
+        k2_mean = float(np.mean([d**2 for d in degrees]))
+
         if k_mean > 0:
             network_factor = k2_mean / k_mean
         else:
             network_factor = 1.0
-        
+
         r0_basic = estimated_params.r0()
         r0_network = r0_basic * network_factor
-        
-        # Bootstrap test for network factor > 1
-        n_bootstrap = 1000
-        bootstrap_factors = []
-        
-        nodes = list(G.nodes())
-        n_nodes = len(nodes)
-        
-        for _ in range(n_bootstrap):
-            # Bootstrap sample of degrees
-            sample_idx = np.random.choice(n_nodes, size=n_nodes, replace=True)
-            sample_degrees = [degrees[i] for i in sample_idx]
-            
-            k_mean_boot = np.mean(sample_degrees)
-            k2_mean_boot = np.mean([d**2 for d in sample_degrees])
-            
-            if k_mean_boot > 0:
-                bootstrap_factors.append(k2_mean_boot / k_mean_boot)
-        
-        # P-value: proportion of bootstrap samples where factor <= 1
-        p_value = np.mean([f <= 1 for f in bootstrap_factors])
-        
-        # Effect size: arithmetic difference from null (network_factor - 1)
-        effect_size = network_factor - 1
-        
-        # 95% CI from bootstrap
-        ci_lower = np.percentile(bootstrap_factors, 2.5)
-        ci_upper = np.percentile(bootstrap_factors, 97.5)
-        
+
+        # --- Null model comparison ---
+        # Generate configuration-model null networks preserving the degree sequence.
+        # The configuration model randomizes connections while keeping each node's
+        # degree fixed, so the null tests whether higher-order structure (clustering,
+        # assortativity, community structure) amplifies contagion beyond what the
+        # degree distribution alone would predict.
+        # Note: nx.configuration_model creates a multigraph; converting to simple
+        # graph removes self-loops and multi-edges, slightly reducing effective
+        # degrees. This is the standard approach in network epidemiology.
+        rng = np.random.default_rng(self.random_seed)
+        null_factors: List[float] = []
+
+        for i in range(n_null):
+            seed = int(rng.integers(0, 2**31))
+            try:
+                G_null = nx.configuration_model(degrees, seed=seed)
+                G_null = nx.Graph(G_null)  # Remove multi-edges
+                G_null.remove_edges_from(nx.selfloop_edges(G_null))
+                null_degrees = [d for _, d in G_null.degree()]
+                k_mean_null = float(np.mean(null_degrees)) if null_degrees else 1.0
+                k2_mean_null = float(np.mean([d**2 for d in null_degrees])) if null_degrees else 1.0
+                null_factors.append(k2_mean_null / max(k_mean_null, 1e-10))
+            except (nx.NetworkXError, Exception):
+                pass
+
+        if len(null_factors) >= 10:
+            # One-sided p-value: fraction of null factors >= observed
+            p_value = float(np.mean([f >= network_factor for f in null_factors]))
+            null_mean = float(np.mean(null_factors))
+            null_std = float(np.std(null_factors))
+
+            # Effect size: (observed - null_mean) / null_std  (Cohen's d)
+            if null_std > 0:
+                effect_size = (network_factor - null_mean) / null_std
+            else:
+                effect_size = 0.0 if network_factor == null_mean else float('inf')
+
+            # 95% CI of the observed factor from bootstrap resampling of degrees
+            bootstrap_factors = []
+            for _ in range(1000):
+                sample_idx = self.rng.choice(n_nodes, size=n_nodes, replace=True)
+                sample_degrees = [degrees[i] for i in sample_idx]
+                k_mean_boot = np.mean(sample_degrees)
+                k2_mean_boot = np.mean([d**2 for d in sample_degrees])
+                if k_mean_boot > 0:
+                    bootstrap_factors.append(float(k2_mean_boot / k_mean_boot))
+
+            if bootstrap_factors:
+                ci_lower = float(np.percentile(bootstrap_factors, 2.5))
+                ci_upper = float(np.percentile(bootstrap_factors, 97.5))
+            else:
+                ci_lower = float(network_factor)
+                ci_upper = float(network_factor)
+        else:
+            # Fallback if null model generation largely failed
+            self.logger.warning("Insufficient null models generated; falling back to bootstrap test")
+            p_value = 1.0
+            effect_size = 0.0
+            ci_lower = float(network_factor)
+            ci_upper = float(network_factor)
+
         return HypothesisResult(
             hypothesis="H2",
-            description="Network structure amplifies FOMO contagion",
+            description="Network structure amplifies FOMO contagion beyond null expectation",
             test_statistic=float(network_factor),
             p_value=float(p_value),
             effect_size=float(effect_size),
-            confidence_interval=(float(ci_lower), float(ci_upper)),
+            confidence_interval=(ci_lower, ci_upper),
             reject_null=bool(p_value < self.alpha),
             alpha=self.alpha,
             sample_size=n_nodes,
@@ -734,7 +873,12 @@ class HypothesisTester:
                 'r0_network': r0_network,
                 'network_factor': network_factor,
                 'mean_degree': k_mean,
-                'degree_variance': np.var(degrees)
+                'degree_variance': float(np.var(degrees)),
+                'null_model_factors': [float(f) for f in null_factors],
+                'null_model_mean': float(np.mean(null_factors)) if null_factors else None,
+                'null_model_std': float(np.std(null_factors)) if null_factors else None,
+                'observed_vs_null_p': float(p_value),
+                'n_null_models': len(null_factors),
             }
         )
     
@@ -819,9 +963,16 @@ class HypothesisTester:
         else:
             corr, p_value = 0.0, 1.0
         
+        # One-tailed test: we hypothesize positive correlation (higher FGI → more infections)
+        two_tailed_p = float(p_value)
+        if corr > 0:
+            p_value_onetail = two_tailed_p / 2
+        else:
+            p_value_onetail = 1 - two_tailed_p / 2
+
         # Effect size (correlation is already standardized)
         effect_size = abs(corr)
-        
+
         # Fisher's z transformation for CI
         n = len(fgi_aligned)
         if abs(corr) < 1:
@@ -831,22 +982,22 @@ class HypothesisTester:
             ci_upper = float(np.tanh(z + 1.96 * se))
         else:
             ci_lower, ci_upper = float(corr), float(corr)
-        
+
         # Compute infection trend safely
         infections_arr = np.asarray(infections, dtype=float)
         try:
             infection_trend = float(np.polyfit(range(len(infections_arr)), infections_arr, 1)[0])
         except Exception:
             infection_trend = 0.0
-        
+
         return HypothesisResult(
             hypothesis="H3",
             description="Fear & Greed Index correlates with FOMO transmission",
             test_statistic=float(corr),
-            p_value=float(p_value),
+            p_value=float(p_value_onetail),
             effect_size=float(effect_size),
             confidence_interval=(ci_lower, ci_upper),
-            reject_null=bool(p_value < self.alpha and corr > 0),
+            reject_null=bool(p_value_onetail < self.alpha and corr > 0),
             alpha=self.alpha,
             sample_size=n,
             additional_metrics={
@@ -857,6 +1008,8 @@ class HypothesisTester:
                 'optimal_lag_days': best_lag,
                 'lag_analysis': lag_results,
                 'best_lag_correlation': float(best_corr),
+                'one_tailed': True,
+                'two_tailed_p_value': two_tailed_p,
             }
         )
     
@@ -944,6 +1097,16 @@ class HypothesisTester:
                 additional_metrics={'reason': 'insufficient_data', 'n_nodes_with_data': len(nodes)}
             )
 
+        # Normalize infection times to numeric (seconds from earliest)
+        # StateAssigner produces datetime objects; tests may use numeric values
+        raw_values = list(infection_times.values())
+        if raw_values and hasattr(raw_values[0], 'timestamp'):
+            min_time = min(raw_values)
+            infection_times = {
+                k: (v - min_time).total_seconds()
+                for k, v in infection_times.items()
+            }
+
         # Split into high/low centrality groups
         centrality_values = [centrality.get(n, 0) for n in nodes]
         median_centrality = np.median(centrality_values)
@@ -953,13 +1116,13 @@ class HypothesisTester:
 
         for node in nodes:
             c = centrality.get(node, 0)
-            t = infection_times.get(node, np.nan)
-
-            if not np.isnan(t):
-                if c >= median_centrality:
-                    high_centrality_times.append(t)
-                else:
-                    low_centrality_times.append(t)
+            if node not in infection_times:
+                continue
+            t = infection_times[node]
+            if c >= median_centrality:
+                high_centrality_times.append(t)
+            else:
+                low_centrality_times.append(t)
 
         # Mann-Whitney U test (non-parametric)
         if len(high_centrality_times) > 5 and len(low_centrality_times) > 5:
@@ -986,30 +1149,82 @@ class HypothesisTester:
         mean_diffs = []
 
         for _ in range(n_bootstrap):
-            h_sample = np.random.choice(high_centrality_times, size=len(high_centrality_times), replace=True)
-            l_sample = np.random.choice(low_centrality_times, size=len(low_centrality_times), replace=True)
+            h_sample = self.rng.choice(high_centrality_times, size=len(high_centrality_times), replace=True)
+            l_sample = self.rng.choice(low_centrality_times, size=len(low_centrality_times), replace=True)
             mean_diffs.append(np.mean(h_sample) - np.mean(l_sample))
 
         ci_lower = np.percentile(mean_diffs, 2.5)
         ci_upper = np.percentile(mean_diffs, 97.5)
 
+        # --- Cox Proportional Hazards survival analysis ---
+        # Models time-to-infection as a function of node degree,
+        # giving hazard ratios and proper p-values for the
+        # centrality -> infection-time relationship.
+        hazard_ratio = None
+        cox_p_value = None
+        cox_concordance = None
+        try:
+            from lifelines import CoxPHFitter
+
+            max_time = max(infection_times.values()) + 1
+            survival_data = []
+            for node in G.nodes():
+                deg = G.degree(node)
+                infected = node in infection_times
+                time = infection_times.get(node, max_time)
+                survival_data.append({
+                    'time': max(float(time), 0.01),
+                    'event': int(infected),
+                    'degree': float(deg)
+                })
+            df_surv = pd.DataFrame(survival_data)
+
+            cph = CoxPHFitter()
+            cph.fit(df_surv, duration_col='time', event_col='event')
+            hazard_ratio = float(np.exp(cph.params_['degree']))
+            cox_p_value = float(cph.summary.loc['degree', 'p'])
+            cox_concordance = float(cph.concordance_index_)
+            self.logger.info(
+                f"H4 Cox PH: hazard_ratio={hazard_ratio:.4f}, "
+                f"p={cox_p_value:.4e}, concordance={cox_concordance:.4f}"
+            )
+        except ImportError:
+            self.logger.warning(
+                "lifelines not installed; Cox PH analysis skipped for H4. "
+                "Install with: pip install lifelines"
+            )
+        except Exception as e:
+            self.logger.warning(f"Cox PH model failed for H4: {e}")
+
+        # Use Cox p-value as primary if available (more powerful test)
+        primary_p = cox_p_value if cox_p_value is not None else p_value
+        primary_stat = hazard_ratio if hazard_ratio is not None else float(stat)
+
+        additional_metrics = {
+            'mean_time_high_centrality': np.mean(high_centrality_times) if high_centrality_times else float('nan'),
+            'mean_time_low_centrality': np.mean(low_centrality_times) if low_centrality_times else float('nan'),
+            'median_centrality': median_centrality,
+            'n_high_centrality': n1,
+            'n_low_centrality': n2,
+            'mann_whitney_statistic': float(stat),
+            'mann_whitney_p_value': float(p_value),
+        }
+        if hazard_ratio is not None:
+            additional_metrics['hazard_ratio'] = hazard_ratio
+            additional_metrics['cox_p_value'] = cox_p_value
+            additional_metrics['cox_concordance'] = cox_concordance
+
         return HypothesisResult(
             hypothesis="H4",
             description="High-centrality nodes are infected earlier",
-            test_statistic=float(stat),
-            p_value=float(p_value),
+            test_statistic=float(primary_stat),
+            p_value=float(primary_p),
             effect_size=float(effect_size),
             confidence_interval=(float(ci_lower), float(ci_upper)),
-            reject_null=bool(p_value < self.alpha),
+            reject_null=bool(primary_p < self.alpha),
             alpha=self.alpha,
             sample_size=n1 + n2,
-            additional_metrics={
-                'mean_time_high_centrality': np.mean(high_centrality_times) if high_centrality_times else float('nan'),
-                'mean_time_low_centrality': np.mean(low_centrality_times) if low_centrality_times else float('nan'),
-                'median_centrality': median_centrality,
-                'n_high_centrality': n1,
-                'n_low_centrality': n2
-            }
+            additional_metrics=additional_metrics
         )
     
     def test_h5_community_clustering(
@@ -1110,49 +1325,89 @@ class HypothesisTester:
         
         observed_within_frac = within_community / total_edges if total_edges > 0 else 0
         
-        # Chi-square test
-        expected_within = expected_within_frac * total_edges
-        expected_between = (1 - expected_within_frac) * total_edges
-        
-        if expected_within > 5 and expected_between > 5:
-            chi2, p_value = stats.chisquare(
-                [within_community, between_community],
-                [expected_within, expected_between]
-            )
-        else:
-            chi2, p_value = 0.0, 1.0
-        
+        # Permutation test: shuffle community labels and recompute within-fraction
+        n_permutations = 1000
+        perm_fracs = []
+        partition_values = list(partition.values())
+        partition_keys = list(partition.keys())
+        rng = np.random.default_rng(self.random_seed if hasattr(self, 'random_seed') else 42)
+        for _ in range(n_permutations):
+            shuffled_values = partition_values.copy()
+            rng.shuffle(shuffled_values)
+            shuffled_partition = dict(zip(partition_keys, shuffled_values))
+            w = 0
+            b = 0
+            if used_infection_data:
+                # Re-count using infection data with shuffled communities
+                if ('node' in state_history.columns and 'state' in state_history.columns):
+                    infection_events = state_history[
+                        state_history['state'].isin(['I', State.INFECTED.value if hasattr(State, 'INFECTED') else 'I'])
+                    ]
+                    if not infection_events.empty:
+                        infected_nodes = set(infection_events['node'].unique()) & set(G.nodes())
+                        for node in infected_nodes:
+                            comm_node = shuffled_partition.get(node, -1)
+                            if comm_node == -1:
+                                continue
+                            try:
+                                neighbors = set(G.neighbors(node))
+                                if G.is_directed():
+                                    neighbors.update(G.predecessors(node))
+                            except Exception:
+                                continue
+                            infected_neighbors = neighbors & infected_nodes
+                            for nbr in infected_neighbors:
+                                comm_nbr = shuffled_partition.get(nbr, -1)
+                                if comm_nbr == -1:
+                                    continue
+                                if comm_node == comm_nbr:
+                                    w += 1
+                                else:
+                                    b += 1
+            else:
+                for u, v in G.edges():
+                    comm_u = shuffled_partition.get(u, -1)
+                    comm_v = shuffled_partition.get(v, -1)
+                    if comm_u == comm_v and comm_u != -1:
+                        w += 1
+                    else:
+                        b += 1
+            total_perm = w + b
+            perm_fracs.append(w / max(total_perm, 1))
+
+        perm_p_value = float(np.mean([f >= observed_within_frac for f in perm_fracs]))
+
         # Effect size: ratio of observed to expected
         if expected_within_frac > 0:
             effect_size = (observed_within_frac - expected_within_frac) / expected_within_frac
         else:
             effect_size = 0.0
-        
+
         # Modularity as additional metric (already computed)
         modularity = modularity_val
-        
+
         # Bootstrap CI for within-community fraction
         n_bootstrap = 1000
         bootstrap_fracs = []
-        
+
         edges = list(G.edges())
         for _ in range(n_bootstrap):
-            sample_edges = [edges[i] for i in np.random.choice(len(edges), size=len(edges), replace=True)]
-            within = sum(1 for u, v in sample_edges 
+            sample_edges = [edges[i] for i in self.rng.choice(len(edges), size=len(edges), replace=True)]
+            within = sum(1 for u, v in sample_edges
                         if node_to_community.get(u, -1) == node_to_community.get(v, -1))
             bootstrap_fracs.append(within / len(sample_edges))
-        
+
         ci_lower = np.percentile(bootstrap_fracs, 2.5)
         ci_upper = np.percentile(bootstrap_fracs, 97.5)
-        
+
         return HypothesisResult(
             hypothesis="H5",
             description="Community structure creates FOMO infection clusters",
-            test_statistic=float(chi2),
-            p_value=float(p_value),
+            test_statistic=float(observed_within_frac),
+            p_value=float(perm_p_value),
             effect_size=float(effect_size),
             confidence_interval=(float(ci_lower), float(ci_upper)),
-            reject_null=bool(p_value < self.alpha and observed_within_frac > expected_within_frac),
+            reject_null=bool(perm_p_value < self.alpha and observed_within_frac > expected_within_frac),
             alpha=self.alpha,
             sample_size=total_edges,
             additional_metrics={
@@ -1160,7 +1415,9 @@ class HypothesisTester:
                 'modularity': modularity,
                 'observed_within_frac': observed_within_frac,
                 'expected_within_frac': expected_within_frac,
-                'largest_community_size': max(community_sizes) if community_sizes else 0
+                'largest_community_size': max(community_sizes) if community_sizes else 0,
+                'permutation_p_value': perm_p_value,
+                'n_permutations': n_permutations,
             }
         )
     

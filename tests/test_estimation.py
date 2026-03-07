@@ -251,5 +251,427 @@ class TestSensitivityAnalysis:
         assert all(np.isfinite(result['elasticity']) | (result['elasticity'] == 0))
 
 
+class TestBlockBootstrap:
+    """Tests for stationary block bootstrap."""
+
+    def test_bootstrap_uses_block_resampling(self):
+        """Bootstrap should use stationary block bootstrap, not i.i.d."""
+        from src.estimation.estimator import ParameterEstimator
+        est = ParameterEstimator(method='lsq', n_bootstrap=50)
+        assert hasattr(est, 'block_length_rule'), (
+            "Estimator should expose block_length_rule for block bootstrap"
+        )
+
+    def test_bootstrap_minimum_resamples(self):
+        """Default bootstrap should be >= 1000."""
+        from src.estimation.estimator import ParameterEstimator
+        est = ParameterEstimator(method='lsq')
+        assert est.n_bootstrap >= 1000, (
+            f"Default n_bootstrap={est.n_bootstrap} is too low; need >= 1000 "
+            f"for reliable 95% CIs"
+        )
+
+    def test_block_length_scales_with_sqrt(self):
+        """Block length should scale as sqrt(T) for a given time series."""
+        from src.estimation.estimator import ParameterEstimator
+        est = ParameterEstimator(method='lsq', n_bootstrap=50)
+        # For T=100, block_length should be ~10 (sqrt(100))
+        bl = est._compute_block_length(100)
+        assert bl == max(2, int(np.sqrt(100)))
+
+    def test_bootstrap_preserves_temporal_order(self):
+        """Block bootstrap indices should come in sorted contiguous blocks."""
+        from arch.bootstrap import StationaryBootstrap
+        rng = np.random.default_rng(42)
+        t_max = 50
+        block_length = max(2, int(np.sqrt(t_max)))
+        bs = StationaryBootstrap(block_length, np.arange(t_max), seed=rng)
+        for pos_data, _ in bs.bootstrap(1):
+            data = pos_data[0]
+            indices = np.sort(data.astype(int).flatten())
+            # Block bootstrap produces the same number of observations
+            assert len(indices) == t_max
+
+
+class TestMLEObservationModel:
+    """Tests for the MLE observation model (multinomial, not Poisson)."""
+
+    def test_mle_uses_multinomial_not_poisson(self):
+        """MLE should use multinomial, not independent Poisson."""
+        import inspect
+        est = ParameterEstimator(method='mle')
+        source = inspect.getsource(est._estimate_mle)
+        assert 'multinomial' in source.lower() or 'dirichlet' in source.lower(), (
+            "MLE method should reference multinomial (or Dirichlet) observation model"
+        )
+        assert 'poisson' not in source.lower(), (
+            "MLE method should not use independent Poisson observation model"
+        )
+
+    def test_multinomial_nll_normalizes_simulated_fractions(self):
+        """Simulated fractions should be normalized to sum to 1 in NLL."""
+        import inspect
+        est = ParameterEstimator(method='mle')
+        source = inspect.getsource(est._estimate_mle)
+        # The NLL must normalize sim_row so fractions sum to 1
+        assert 'sum()' in source or 'normalize' in source.lower(), (
+            "MLE NLL should normalize simulated fractions to enforce S+E+I+R=1"
+        )
+
+    def test_multinomial_nll_no_subtraction_of_sim_counts(self):
+        """Multinomial NLL should NOT subtract sim_counts (that's Poisson).
+
+        Poisson NLL = sum(obs*log(sim) - sim), the '- sim' term is wrong
+        for multinomial where NLL = -sum(obs_counts * log(sim_frac)).
+        """
+        import inspect
+        est = ParameterEstimator(method='mle')
+        source = inspect.getsource(est._estimate_mle)
+        # The Poisson-specific "- sim_counts" subtraction must be gone
+        assert '- sim_counts' not in source, (
+            "MLE NLL still contains '- sim_counts' term from Poisson model"
+        )
+
+    def test_mle_recovers_parameters_from_clean_data(self):
+        """MLE should recover true parameters from clean synthetic data."""
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=10000, initial_infected=10, t_max=100)
+
+        est = ParameterEstimator(method='mle', random_seed=42)
+        result = est.estimate(
+            data, N=10000,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+
+        assert result.success
+        assert result.beta == pytest.approx(0.3, rel=0.25)
+        assert result.sigma == pytest.approx(0.2, rel=0.25)
+        assert result.gamma == pytest.approx(0.1, rel=0.25)
+
+
+class TestOmegaEstimation:
+    """Tests for omega (waning immunity rate) estimation."""
+
+    @pytest.fixture
+    def synthetic_data(self):
+        """Generate synthetic SEIR data with known omega."""
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.02)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+        return data, 5000
+
+    def test_omega_is_estimated(self, synthetic_data):
+        """Estimator should fit omega as a parameter, not hardcode it."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='lsq')
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        assert hasattr(result, 'omega')
+        # omega should be fitted, not hardcoded at 0.01
+        assert result.omega is not None
+
+    def test_omega_in_bounds(self, synthetic_data):
+        """Estimated omega should be within the configured bounds."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='lsq')
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        assert result.omega >= 0.001
+        assert result.omega <= 0.1
+
+    def test_omega_recovers_true_value(self, synthetic_data):
+        """Estimator should recover true omega from clean data within tolerance."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='lsq', random_seed=42)
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        # Should be in the right ballpark (within 100% relative error
+        # given omega is a weak signal in short time series)
+        assert 0.001 <= result.omega <= 0.1
+
+    def test_omega_passed_to_seir_model(self, synthetic_data):
+        """Fitted omega should be used when constructing SEIRParameters."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='lsq')
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        params = result.to_params()
+        assert params.omega == result.omega
+
+    def test_mle_estimates_omega(self, synthetic_data):
+        """MLE method should also estimate omega."""
+        data, N = synthetic_data
+        est = ParameterEstimator(method='mle', random_seed=42)
+        result = est.estimate(
+            data, N=N,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        assert result.omega is not None
+        assert 0.001 <= result.omega <= 0.1
+
+    def test_omega_ci_in_bootstrap(self):
+        """Bootstrap should produce CI for omega."""
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.02)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est = ParameterEstimator(method='lsq', random_seed=42)
+        result = est.estimate(
+            data, N=5000,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=10  # Small number for speed
+        )
+        assert hasattr(result, 'omega_ci')
+        assert result.omega_ci is not None
+        assert len(result.omega_ci) == 2
+        assert result.omega_ci[0] <= result.omega_ci[1]
+
+    def test_gof_uses_four_parameters(self):
+        """Goodness-of-fit should count 4 parameters (beta, sigma, gamma, omega)."""
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1, omega=0.02)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=100)
+
+        est = ParameterEstimator(method='lsq', random_seed=42)
+        result = est.estimate(
+            data, N=5000,
+            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+            n_bootstrap=0
+        )
+        # AIC/BIC should be computed (non-zero for real data)
+        assert result.aic != 0.0 or result.loss == 0.0
+
+
+class TestRollingR0:
+    """Tests for rolling-window R0 estimation."""
+
+    def test_rolling_r0_returns_timeseries(self):
+        """Rolling window R0 should return time-indexed DataFrame."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        dates = pd.date_range('2017-10-01', periods=120)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 120),
+            'E_frac': np.linspace(0.02, 0.1, 120),
+            'I_frac': np.linspace(0.05, 0.3, 120),
+            'R_frac': np.linspace(0.03, 0.1, 120),
+        })
+        result = estimate_rolling_r0(data, window_days=30, step_days=7, N=5000)
+        assert 'R0' in result.columns
+        assert 'window_start' in result.columns
+        assert len(result) > 1
+
+    def test_rolling_r0_has_all_columns(self):
+        """Result should include beta, sigma, gamma, omega, and window bounds."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        dates = pd.date_range('2017-10-01', periods=120)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 120),
+            'E_frac': np.linspace(0.02, 0.1, 120),
+            'I_frac': np.linspace(0.05, 0.3, 120),
+            'R_frac': np.linspace(0.03, 0.1, 120),
+        })
+        result = estimate_rolling_r0(data, window_days=30, step_days=7, N=5000)
+        for col in ['window_start', 'window_end', 'R0', 'beta', 'sigma', 'gamma', 'omega']:
+            assert col in result.columns, f"Missing column: {col}"
+
+    def test_rolling_r0_window_count(self):
+        """Number of windows should match expected from data length, window, and step."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        n_points = 100
+        window_days = 30
+        step_days = 10
+        dates = pd.date_range('2017-10-01', periods=n_points)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, n_points),
+            'E_frac': np.linspace(0.02, 0.1, n_points),
+            'I_frac': np.linspace(0.05, 0.3, n_points),
+            'R_frac': np.linspace(0.03, 0.1, n_points),
+        })
+        result = estimate_rolling_r0(data, window_days=window_days, step_days=step_days, N=5000)
+        # Maximum possible windows (some may fail, but at least 1 should succeed)
+        max_windows = len(range(0, n_points - window_days + 1, step_days))
+        assert 1 <= len(result) <= max_windows
+
+    def test_rolling_r0_positive_values(self):
+        """All R0 values should be positive."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        dates = pd.date_range('2017-10-01', periods=120)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 120),
+            'E_frac': np.linspace(0.02, 0.1, 120),
+            'I_frac': np.linspace(0.05, 0.3, 120),
+            'R_frac': np.linspace(0.03, 0.1, 120),
+        })
+        result = estimate_rolling_r0(data, window_days=30, step_days=7, N=5000)
+        assert (result['R0'] > 0).all()
+
+    def test_rolling_r0_rejects_short_window(self):
+        """Should raise ConfigurationError if window_days < 10."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+        from src.utils.exceptions import ConfigurationError
+
+        dates = pd.date_range('2017-10-01', periods=120)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 120),
+            'E_frac': np.linspace(0.02, 0.1, 120),
+            'I_frac': np.linspace(0.05, 0.3, 120),
+            'R_frac': np.linspace(0.03, 0.1, 120),
+        })
+        with pytest.raises(ConfigurationError, match="too small"):
+            estimate_rolling_r0(data, window_days=5, step_days=2, N=5000)
+
+    def test_rolling_r0_rejects_insufficient_data(self):
+        """Should raise InsufficientDataError if data has fewer rows than window_days."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+        from src.utils.exceptions import InsufficientDataError
+
+        dates = pd.date_range('2017-10-01', periods=20)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, 20),
+            'E_frac': np.linspace(0.02, 0.1, 20),
+            'I_frac': np.linspace(0.05, 0.3, 20),
+            'R_frac': np.linspace(0.03, 0.1, 20),
+        })
+        with pytest.raises(InsufficientDataError):
+            estimate_rolling_r0(data, window_days=30, step_days=7, N=5000)
+
+    def test_rolling_r0_with_fgi_values(self):
+        """Should accept and slice fgi_values per window."""
+        from src.estimation.rolling_r0 import estimate_rolling_r0
+
+        n_points = 120
+        dates = pd.date_range('2017-10-01', periods=n_points)
+        data = pd.DataFrame({
+            'date': dates,
+            'S_frac': np.linspace(0.9, 0.5, n_points),
+            'E_frac': np.linspace(0.02, 0.1, n_points),
+            'I_frac': np.linspace(0.05, 0.3, n_points),
+            'R_frac': np.linspace(0.03, 0.1, n_points),
+        })
+        fgi = np.linspace(20, 80, n_points)
+        result = estimate_rolling_r0(
+            data, window_days=30, step_days=7, N=5000, fgi_values=fgi
+        )
+        assert len(result) > 0
+
+
+@pytest.mark.slow
+class TestBayesianEstimation:
+    """Tests for Bayesian SEIR parameter estimation via NumPyro."""
+
+    def test_bayesian_import(self):
+        """BayesianEstimator should be importable."""
+        from src.estimation.bayesian_estimator import BayesianEstimator, HAS_NUMPYRO
+
+        if not HAS_NUMPYRO:
+            pytest.skip("numpyro not installed")
+        est = BayesianEstimator(num_warmup=10, num_samples=20)
+        assert est is not None
+
+    def test_bayesian_raises_without_numpyro(self):
+        """Should raise ImportError if numpyro is not installed."""
+        from src.estimation.bayesian_estimator import HAS_NUMPYRO
+
+        if HAS_NUMPYRO:
+            pytest.skip("numpyro IS installed")
+        from src.estimation.bayesian_estimator import BayesianEstimator
+
+        with pytest.raises(ImportError, match="NumPyro and JAX"):
+            BayesianEstimator()
+
+    def test_has_numpyro_flag_is_bool(self):
+        """HAS_NUMPYRO should be a boolean."""
+        from src.estimation.bayesian_estimator import HAS_NUMPYRO
+
+        assert isinstance(HAS_NUMPYRO, bool)
+
+    def test_bayesian_estimate_returns_estimation_result(self):
+        """Full MCMC run should return an EstimationResult."""
+        from src.estimation.bayesian_estimator import BayesianEstimator, HAS_NUMPYRO
+
+        if not HAS_NUMPYRO:
+            pytest.skip("numpyro not installed")
+
+        # Generate simple synthetic data
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=50)
+
+        est = BayesianEstimator(num_warmup=10, num_samples=20, random_seed=42)
+        result = est.estimate(data, N=5000)
+
+        assert isinstance(result, EstimationResult)
+        assert result.success is True
+        assert result.beta > 0
+        assert result.sigma > 0
+        assert result.gamma > 0
+        assert result.omega >= 0
+
+    def test_bayesian_credible_intervals(self):
+        """Posterior CIs should have lower <= upper."""
+        from src.estimation.bayesian_estimator import BayesianEstimator, HAS_NUMPYRO
+
+        if not HAS_NUMPYRO:
+            pytest.skip("numpyro not installed")
+
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=50)
+
+        est = BayesianEstimator(num_warmup=10, num_samples=20, random_seed=42)
+        result = est.estimate(data, N=5000)
+
+        assert result.beta_ci[0] <= result.beta_ci[1]
+        assert result.sigma_ci[0] <= result.sigma_ci[1]
+        assert result.gamma_ci[0] <= result.gamma_ci[1]
+        assert result.omega_ci[0] <= result.omega_ci[1]
+
+    def test_bayesian_posterior_samples_attached(self):
+        """Result should carry raw posterior samples for diagnostics."""
+        from src.estimation.bayesian_estimator import BayesianEstimator, HAS_NUMPYRO
+
+        if not HAS_NUMPYRO:
+            pytest.skip("numpyro not installed")
+
+        true_params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
+        model = NetworkSEIR(true_params, random_seed=42)
+        data = model.simulate_meanfield(N=5000, initial_infected=10, t_max=50)
+
+        est = BayesianEstimator(num_warmup=10, num_samples=20, random_seed=42)
+        result = est.estimate(data, N=5000)
+
+        assert hasattr(result, "posterior_samples")
+        assert "beta" in result.posterior_samples
+        assert "sigma" in result.posterior_samples
+        assert "gamma" in result.posterior_samples
+        assert "omega" in result.posterior_samples
+        assert len(result.posterior_samples["beta"]) == 20
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

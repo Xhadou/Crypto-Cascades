@@ -6,7 +6,7 @@ using various optimization methods.
 
 Methods:
 1. Least Squares Fitting - Minimize sum of squared differences
-2. Maximum Likelihood Estimation - Poisson observation model
+2. Maximum Likelihood Estimation - Multinomial observation model
 3. Bayesian Inference - MCMC sampling with prior distributions
 """
 
@@ -17,6 +17,8 @@ from scipy import stats
 from typing import Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass
 import logging
+
+from arch.bootstrap import StationaryBootstrap
 
 from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
 from src.utils.logger import get_logger
@@ -29,16 +31,18 @@ class EstimationResult:
     sigma: float
     gamma: float
     omega: float = 0.01
-    
+
     # Uncertainty quantification
     beta_ci: Tuple[float, float] = (0.0, 1.0)
     sigma_ci: Tuple[float, float] = (0.0, 1.0)
     gamma_ci: Tuple[float, float] = (0.0, 1.0)
+    omega_ci: Tuple[float, float] = (0.001, 0.1)
     
     # Goodness of fit
     loss: float = 0.0
     r_squared: float = 0.0
     aic: float = 0.0
+    aicc: float = 0.0
     bic: float = 0.0
     
     # Convergence info
@@ -73,53 +77,75 @@ class ParameterEstimator:
     def __init__(
         self,
         method: str = 'lsq',
-        random_seed: int = 42
+        random_seed: int = 42,
+        n_bootstrap: int = 2000
     ):
         """
         Initialize the estimator.
-        
+
         Args:
             method: Estimation method ('lsq', 'mle', 'bayesian')
             random_seed: Random seed for reproducibility
+            n_bootstrap: Default number of bootstrap resamples for CIs
         """
         self.method = method
         self.random_seed = random_seed
-        np.random.seed(random_seed)
-        
+        self.n_bootstrap = n_bootstrap
+        self.block_length_rule = 'sqrt'  # block length = sqrt(T)
+        self.rng = np.random.default_rng(random_seed)
+
         self.logger = get_logger(__name__)
-        
+
         # Parameter bounds
         self.bounds = {
             'beta': (0.01, 1.0),
             'sigma': (0.01, 1.0),
             'gamma': (0.01, 1.0),
+            'omega': (0.001, 0.1),
         }
         
+    def _compute_block_length(self, t_max: int) -> int:
+        """Compute block length for stationary block bootstrap.
+
+        Uses sqrt(T) rule (Politis & Romano 1994).
+
+        Args:
+            t_max: Length of the time series.
+
+        Returns:
+            Block length (at least 2).
+        """
+        return max(2, int(np.sqrt(t_max)))
+
     def estimate(
         self,
         observed_data: pd.DataFrame,
         N: int,
         fgi_values: Optional[np.ndarray] = None,
         initial_guess: Optional[Dict[str, float]] = None,
-        n_bootstrap: int = 100
+        n_bootstrap: Optional[int] = None
     ) -> EstimationResult:
         """
         Estimate SEIR parameters from observed data.
-        
+
         Args:
             observed_data: DataFrame with columns [t, S, E, I, R] or fractions
             N: Total population
             fgi_values: Fear & Greed Index values
             initial_guess: Initial parameter values
-            n_bootstrap: Number of bootstrap samples for CI
-            
+            n_bootstrap: Number of bootstrap samples for CI (None = use instance default)
+
         Returns:
             EstimationResult with fitted parameters and uncertainty
         """
+        if n_bootstrap is None:
+            n_bootstrap = self.n_bootstrap
         self.logger.info(f"Estimating parameters using {self.method} method...")
         
         if initial_guess is None:
-            initial_guess = {'beta': 0.3, 'sigma': 0.2, 'gamma': 0.1}
+            initial_guess = {'beta': 0.3, 'sigma': 0.2, 'gamma': 0.1, 'omega': 0.01}
+        if 'omega' not in initial_guess:
+            initial_guess['omega'] = 0.01
         
         if self.method == 'lsq':
             result = self._estimate_lsq(observed_data, N, fgi_values, initial_guess)
@@ -139,7 +165,7 @@ class ParameterEstimator:
         
         self.logger.info(
             f"Estimation complete: β={result.beta:.4f}, σ={result.sigma:.4f}, "
-            f"γ={result.gamma:.4f}, R₀={result.r0():.3f}"
+            f"γ={result.gamma:.4f}, ω={result.omega:.4f}, R₀={result.r0():.3f}"
         )
         
         return result
@@ -151,28 +177,28 @@ class ParameterEstimator:
         fgi_values: Optional[np.ndarray],
         initial_guess: Dict[str, float]
     ) -> EstimationResult:
-        """Nonlinear least squares estimation."""
-        
+        """Nonlinear least squares estimation with 4 parameters (β, σ, γ, ω)."""
+
         # Normalize data
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
-        
+
         def residuals(params):
             """Compute residuals between observed and simulated."""
-            beta, sigma, gamma = params
-            
+            beta, sigma, gamma, omega = params
+
             seir_params = SEIRParameters(
-                beta=beta, sigma=sigma, gamma=gamma, omega=0.01,
+                beta=beta, sigma=sigma, gamma=gamma, omega=omega,
                 fomo_enabled=fgi_values is not None
             )
             model = NetworkSEIR(seir_params)
-            
+
             # Get initial conditions
             I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
-            
+
             # Run simulation
             sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
-            
+
             # Compute residuals for all compartments
             res = np.concatenate([
                 np.asarray(sim['S_frac'].values) - np.asarray(obs_fracs['S_frac'].values),
@@ -180,18 +206,22 @@ class ParameterEstimator:
                 np.asarray(sim['I_frac'].values) - np.asarray(obs_fracs['I_frac'].values),
                 np.asarray(sim['R_frac'].values) - np.asarray(obs_fracs['R_frac'].values),
             ])
-            
+
             return res
-        
-        # Initial guess
-        x0 = [initial_guess['beta'], initial_guess['sigma'], initial_guess['gamma']]
-        
-        # Bounds
+
+        # Initial guess — 4 parameters
+        omega_init = initial_guess.get('omega', 0.01)
+        x0 = [initial_guess['beta'], initial_guess['sigma'],
+              initial_guess['gamma'], omega_init]
+
+        # Bounds — 4 parameters
         bounds = (
-            [self.bounds['beta'][0], self.bounds['sigma'][0], self.bounds['gamma'][0]],
-            [self.bounds['beta'][1], self.bounds['sigma'][1], self.bounds['gamma'][1]],
+            [self.bounds['beta'][0], self.bounds['sigma'][0],
+             self.bounds['gamma'][0], self.bounds['omega'][0]],
+            [self.bounds['beta'][1], self.bounds['sigma'][1],
+             self.bounds['gamma'][1], self.bounds['omega'][1]],
         )
-        
+
         # Optimize
         result = optimize.least_squares(
             residuals,
@@ -201,11 +231,12 @@ class ParameterEstimator:
             loss='soft_l1',  # Robust to outliers
             verbose=0
         )
-        
+
         return EstimationResult(
             beta=result.x[0],
             sigma=result.x[1],
             gamma=result.x[2],
+            omega=result.x[3],
             loss=result.cost,
             success=result.success,
             message=result.message,
@@ -219,40 +250,56 @@ class ParameterEstimator:
         fgi_values: Optional[np.ndarray],
         initial_guess: Dict[str, float]
     ) -> EstimationResult:
-        """Maximum likelihood estimation with Poisson observation model."""
-        
+        """Maximum likelihood estimation with multinomial observation model.
+
+        Uses a multinomial log-likelihood that respects the constraint
+        S + E + I + R = N.  At each time step the observed counts are
+        treated as a single multinomial draw of size N with category
+        probabilities given by the simulated SEIR fractions.
+
+        Estimates 4 parameters: β, σ, γ, ω.
+        """
+
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
-        
+
         def neg_log_likelihood(params):
-            """Compute negative log-likelihood."""
-            beta, sigma, gamma = params
-            
+            """Multinomial negative log-likelihood for SEIR compartments."""
+            beta, sigma, gamma, omega = params
+
             seir_params = SEIRParameters(
-                beta=beta, sigma=sigma, gamma=gamma, omega=0.01,
+                beta=beta, sigma=sigma, gamma=gamma, omega=omega,
                 fomo_enabled=fgi_values is not None
             )
             model = NetworkSEIR(seir_params)
-            
+
             I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
             sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
-            
-            # Poisson log-likelihood
+
+            # Multinomial log-likelihood: sum_t sum_c obs_count_c(t) * log(sim_frac_c(t))
             eps = 1e-10
-            nll = 0
-            
-            for col in ['S', 'E', 'I', 'R']:
-                obs_counts = np.asarray(obs_fracs[f'{col}_frac'].values) * N
-                sim_counts = np.asarray(sim[f'{col}_frac'].values) * N + eps
-                
-                # Log-likelihood: sum(obs * log(sim) - sim)
-                nll -= np.sum(obs_counts * np.log(sim_counts) - sim_counts)
-            
+            nll = 0.0
+
+            for t_idx in range(t_max):
+                obs_row = np.array([
+                    obs_fracs[f'{c}_frac'].iloc[t_idx] for c in ['S', 'E', 'I', 'R']
+                ])
+                sim_row = np.array([
+                    sim[f'{c}_frac'].iloc[t_idx] for c in ['S', 'E', 'I', 'R']
+                ])
+                # Normalize simulated fractions to sum to 1
+                sim_row = sim_row / (sim_row.sum() + eps)
+                obs_counts = obs_row * N
+                nll -= np.sum(obs_counts * np.log(sim_row + eps))
+
             return nll
-        
-        x0 = [initial_guess['beta'], initial_guess['sigma'], initial_guess['gamma']]
-        bounds = [self.bounds['beta'], self.bounds['sigma'], self.bounds['gamma']]
-        
+
+        omega_init = initial_guess.get('omega', 0.01)
+        x0 = [initial_guess['beta'], initial_guess['sigma'],
+              initial_guess['gamma'], omega_init]
+        bounds = [self.bounds['beta'], self.bounds['sigma'],
+                  self.bounds['gamma'], self.bounds['omega']]
+
         result = optimize.minimize(
             neg_log_likelihood,
             x0,
@@ -260,11 +307,12 @@ class ParameterEstimator:
             bounds=bounds,
             options={'maxiter': 1000}
         )
-        
+
         return EstimationResult(
             beta=result.x[0],
             sigma=result.x[1],
             gamma=result.x[2],
+            omega=result.x[3],
             loss=result.fun,
             success=result.success,
             message=result.message if hasattr(result, 'message') else "",
@@ -279,36 +327,61 @@ class ParameterEstimator:
         fgi_values: Optional[np.ndarray],
         n_bootstrap: int
     ) -> EstimationResult:
-        """Compute bootstrap confidence intervals."""
-        self.logger.info(f"Computing {n_bootstrap} bootstrap CIs...")
-        
+        """Compute bootstrap confidence intervals using stationary block bootstrap.
+
+        Uses the stationary block bootstrap of Politis & Romano (1994) to
+        preserve temporal autocorrelation in the SEIR time series.  Block
+        length is chosen as sqrt(T).
+        """
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
-        
-        bootstrap_betas = []
-        bootstrap_sigmas = []
-        bootstrap_gammas = []
-        
-        for i in range(n_bootstrap):
-            # Resample with replacement
-            indices = np.random.choice(t_max, size=t_max, replace=True)
-            indices.sort()
-            
+
+        block_length = self._compute_block_length(t_max)
+        self.logger.info(
+            f"Computing {n_bootstrap} block-bootstrap CIs "
+            f"(block_length={block_length}, T={t_max})..."
+        )
+
+        bootstrap_betas: List[float] = []
+        bootstrap_sigmas: List[float] = []
+        bootstrap_gammas: List[float] = []
+        bootstrap_omegas: List[float] = []
+
+        bs = StationaryBootstrap(
+            block_length, np.arange(t_max), seed=self.random_seed
+        )
+
+        for pos_data, _ in bs.bootstrap(n_bootstrap):
+            data = pos_data[0]
+            indices = np.sort(data.astype(int).flatten())
+            # Clip to valid range
+            indices = np.clip(indices, 0, len(obs_fracs) - 1)
+
             bootstrap_df = obs_fracs.iloc[indices].reset_index(drop=True)
-            
-            # Re-estimate
-            initial = {'beta': result.beta, 'sigma': result.sigma, 'gamma': result.gamma}
-            
+
+            # Resample FGI with same indices to maintain temporal alignment
+            fgi_boot = fgi_values[indices] if fgi_values is not None else None
+
+            # Re-estimate from block-bootstrapped series
+            initial = {
+                'beta': result.beta,
+                'sigma': result.sigma,
+                'gamma': result.gamma,
+                'omega': result.omega,
+            }
+
             try:
-                boot_result = self._estimate_lsq(bootstrap_df, N, fgi_values, initial)
-                
+                boot_result = self._estimate_lsq(
+                    bootstrap_df, N, fgi_boot, initial
+                )
                 if boot_result.success:
                     bootstrap_betas.append(boot_result.beta)
                     bootstrap_sigmas.append(boot_result.sigma)
                     bootstrap_gammas.append(boot_result.gamma)
+                    bootstrap_omegas.append(boot_result.omega)
             except Exception:
                 continue
-        
+
         # Compute 95% CIs
         if len(bootstrap_betas) >= 10:
             result.beta_ci = (
@@ -323,7 +396,11 @@ class ParameterEstimator:
                 float(np.percentile(bootstrap_gammas, 2.5)),
                 float(np.percentile(bootstrap_gammas, 97.5))
             )
-        
+            result.omega_ci = (
+                float(np.percentile(bootstrap_omegas, 2.5)),
+                float(np.percentile(bootstrap_omegas, 97.5))
+            )
+
         return result
     
     def _compute_gof_metrics(
@@ -355,15 +432,24 @@ class ParameterEstimator:
             result.r_squared = 1 - ss_res / ss_tot
         
         # AIC and BIC
-        n = t_max * 4  # 4 compartments
-        k = 3  # 3 parameters
-        
-        if result.loss > 0:
-            # Assuming loss is sum of squared residuals
-            sigma2 = result.loss / n
+        n = t_max * 4  # 4 compartments observed per time step
+        k = 4  # 4 parameters (beta, sigma, gamma, omega)
+
+        # Compute log-likelihood from actual residuals, not result.loss
+        # (result.loss may be soft_l1-transformed for LSQ, or NLL for MLE)
+        all_obs = np.concatenate([obs_fracs[f'{c}_frac'].values for c in ['S', 'E', 'I', 'R']])
+        all_sim = np.concatenate([sim[f'{c}_frac'].values for c in ['S', 'E', 'I', 'R']])
+        ssr = np.sum((all_obs - all_sim) ** 2)
+
+        if ssr > 0:
+            sigma2 = ssr / n
             ll = -n / 2 * (1 + np.log(2 * np.pi * sigma2))
-            
+
             result.aic = 2 * k - 2 * ll
+            if n > k + 1:
+                result.aicc = result.aic + 2 * k * (k + 1) / (n - k - 1)
+            else:
+                result.aicc = np.inf
             result.bic = k * np.log(n) - 2 * ll
         
         return result
