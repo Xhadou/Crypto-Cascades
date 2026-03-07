@@ -529,8 +529,9 @@ class TestRollingR0:
         assert (result['R0'] > 0).all()
 
     def test_rolling_r0_rejects_short_window(self):
-        """Should raise ValueError if window_days < 10."""
+        """Should raise ConfigurationError if window_days < 10."""
         from src.estimation.rolling_r0 import estimate_rolling_r0
+        from src.utils.exceptions import ConfigurationError
 
         dates = pd.date_range('2017-10-01', periods=120)
         data = pd.DataFrame({
@@ -540,12 +541,13 @@ class TestRollingR0:
             'I_frac': np.linspace(0.05, 0.3, 120),
             'R_frac': np.linspace(0.03, 0.1, 120),
         })
-        with pytest.raises(ValueError, match="too small"):
+        with pytest.raises(ConfigurationError, match="too small"):
             estimate_rolling_r0(data, window_days=5, step_days=2, N=5000)
 
     def test_rolling_r0_rejects_insufficient_data(self):
-        """Should raise ValueError if data has fewer rows than window_days."""
+        """Should raise InsufficientDataError if data has fewer rows than window_days."""
         from src.estimation.rolling_r0 import estimate_rolling_r0
+        from src.utils.exceptions import InsufficientDataError
 
         dates = pd.date_range('2017-10-01', periods=20)
         data = pd.DataFrame({
@@ -555,7 +557,7 @@ class TestRollingR0:
             'I_frac': np.linspace(0.05, 0.3, 20),
             'R_frac': np.linspace(0.03, 0.1, 20),
         })
-        with pytest.raises(ValueError, match="need at least window_days"):
+        with pytest.raises(InsufficientDataError):
             estimate_rolling_r0(data, window_days=30, step_days=7, N=5000)
 
     def test_rolling_r0_with_fgi_values(self):
