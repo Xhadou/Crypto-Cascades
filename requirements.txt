@@ -31,7 +31,6 @@ plotly>=5.14.0
 # Configuration
 pyyaml>=6.0
 pydantic>=2.0
-pydantic-settings>=2.0
 
 # Utilities
 tqdm>=4.65.0
