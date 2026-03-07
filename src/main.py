@@ -472,6 +472,7 @@ class CryptoCascadesPipeline:
             infected_z_threshold=self.config.get('state_assignment.infected.z_threshold', 1.5),
             exposure_timeout_days=self.config.get('state_assignment.exposed.timeout_days', 14),
             spontaneous_infection_rate=self.config.get('state_assignment.infected.spontaneous_rate', 0.001),
+            random_seed=self.random_seed,
         )
         
         # Compute wallet flows for state assignment

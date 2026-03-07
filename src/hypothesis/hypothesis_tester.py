@@ -415,17 +415,17 @@ class HypothesisTester:
             I_seir = seir_sim['I_frac'].values[:len(t)]
             seir_residuals = I_obs - I_seir
             seir_sse = np.sum(seir_residuals**2)
-            seir_aic = self._compute_aic(seir_sse, n_params=4, n_obs=len(t))
+            seir_aicc = self._compute_aicc(seir_sse, n_params=4, n_obs=len(t))
             model_results['SEIR'] = {
                 'sse': seir_sse,
-                'aic': seir_aic,
+                'aicc': seir_aicc,
                 'n_params': 4,
                 'fitted': I_seir
             }
             fitting_diagnostics['SEIR'] = {'status': 'success', 'sse': float(seir_sse)}
         except Exception as e:
             self.logger.warning(f"SEIR fitting failed: {e}")
-            model_results['SEIR'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 3}
+            model_results['SEIR'] = {'sse': np.inf, 'aicc': np.inf, 'n_params': 3}
             fitting_diagnostics['SEIR'] = {'status': 'failed', 'error': str(e)}
 
         # --- Model 2: Exponential growth ---
@@ -438,12 +438,12 @@ class HypothesisTester:
                                bounds=([0, -1], [1, 1]), maxfev=5000)
             I_exp = exponential(t, *popt)
             exp_sse = np.sum((I_obs - I_exp)**2)
-            exp_aic = self._compute_aic(exp_sse, n_params=2, n_obs=len(t))
-            model_results['Exponential'] = {'sse': exp_sse, 'aic': exp_aic, 'n_params': 2, 'fitted': I_exp}
+            exp_aicc = self._compute_aicc(exp_sse, n_params=2, n_obs=len(t))
+            model_results['Exponential'] = {'sse': exp_sse, 'aicc': exp_aicc, 'n_params': 2, 'fitted': I_exp}
             fitting_diagnostics['Exponential'] = {'status': 'success', 'sse': float(exp_sse)}
         except Exception as e:
             self.logger.warning(f"Exponential fitting failed: {e}")
-            model_results['Exponential'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 2}
+            model_results['Exponential'] = {'sse': np.inf, 'aicc': np.inf, 'n_params': 2}
             fitting_diagnostics['Exponential'] = {'status': 'failed', 'error': str(e)}
 
         # --- Model 3: Logistic growth ---
@@ -456,12 +456,12 @@ class HypothesisTester:
                                bounds=([0, 0, 0], [1, 10, t.max()*2]), maxfev=5000)
             I_log = logistic(t, *popt)
             log_sse = np.sum((I_obs - I_log)**2)
-            log_aic = self._compute_aic(log_sse, n_params=3, n_obs=len(t))
-            model_results['Logistic'] = {'sse': log_sse, 'aic': log_aic, 'n_params': 3, 'fitted': I_log}
+            log_aicc = self._compute_aicc(log_sse, n_params=3, n_obs=len(t))
+            model_results['Logistic'] = {'sse': log_sse, 'aicc': log_aicc, 'n_params': 3, 'fitted': I_log}
             fitting_diagnostics['Logistic'] = {'status': 'success', 'sse': float(log_sse)}
         except Exception as e:
             self.logger.warning(f"Logistic fitting failed: {e}")
-            model_results['Logistic'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 3}
+            model_results['Logistic'] = {'sse': np.inf, 'aicc': np.inf, 'n_params': 3}
             fitting_diagnostics['Logistic'] = {'status': 'failed', 'error': str(e)}
 
         # --- Model 4: Linear growth ---
@@ -472,44 +472,44 @@ class HypothesisTester:
             popt, _ = curve_fit(linear, t, I_obs, maxfev=5000)
             I_lin = linear(t, *popt)
             lin_sse = np.sum((I_obs - I_lin)**2)
-            lin_aic = self._compute_aic(lin_sse, n_params=2, n_obs=len(t))
-            model_results['Linear'] = {'sse': lin_sse, 'aic': lin_aic, 'n_params': 2, 'fitted': I_lin}
+            lin_aicc = self._compute_aicc(lin_sse, n_params=2, n_obs=len(t))
+            model_results['Linear'] = {'sse': lin_sse, 'aicc': lin_aicc, 'n_params': 2, 'fitted': I_lin}
             fitting_diagnostics['Linear'] = {'status': 'success', 'sse': float(lin_sse)}
         except Exception as e:
             self.logger.warning(f"Linear fitting failed: {e}")
-            model_results['Linear'] = {'sse': np.inf, 'aic': np.inf, 'n_params': 2}
+            model_results['Linear'] = {'sse': np.inf, 'aicc': np.inf, 'n_params': 2}
             fitting_diagnostics['Linear'] = {'status': 'failed', 'error': str(e)}
 
         # --- Compare models ---
-        valid_models = {k: v for k, v in model_results.items() if np.isfinite(v['aic'])}
+        valid_models = {k: v for k, v in model_results.items() if np.isfinite(v['aicc'])}
 
         if not valid_models or 'SEIR' not in valid_models:
             return self._inconclusive_result("H1", "Model fitting failed")
 
-        # Find best model by AIC
-        best_model = min(valid_models.keys(), key=lambda x: valid_models[x]['aic'])
-        seir_aic = valid_models['SEIR']['aic']
-        best_aic = valid_models[best_model]['aic']
+        # Find best model by AICc (small-sample corrected)
+        best_model = min(valid_models.keys(), key=lambda x: valid_models[x]['aicc'])
+        seir_aicc = valid_models['SEIR']['aicc']
+        best_aicc = valid_models[best_model]['aicc']
 
-        # Compute AIC weights (Akaike weights)
-        aic_values = [v['aic'] for v in valid_models.values()]
-        min_aic = min(aic_values)
-        delta_aic = {k: v['aic'] - min_aic for k, v in valid_models.items()}
-        exp_delta = {k: np.exp(-0.5 * d) for k, d in delta_aic.items()}
+        # Compute AICc weights (Akaike weights)
+        aicc_values = [v['aicc'] for v in valid_models.values()]
+        min_aicc = min(aicc_values)
+        delta_aicc = {k: v['aicc'] - min_aicc for k, v in valid_models.items()}
+        exp_delta = {k: np.exp(-0.5 * d) for k, d in delta_aicc.items()}
         sum_exp = sum(exp_delta.values())
-        aic_weights = {k: v / sum_exp for k, v in exp_delta.items()}
+        aicc_weights = {k: v / sum_exp for k, v in exp_delta.items()}
 
-        # SEIR is supported if it has highest AIC weight or delta_AIC < 2 from best
-        seir_delta_aic = seir_aic - best_aic
-        seir_supported = (best_model == 'SEIR') or (seir_delta_aic < 2)
+        # SEIR is supported if it has highest AICc weight or ΔAICc < 2 from best
+        seir_delta_aicc = seir_aicc - best_aicc
+        seir_supported = (best_model == 'SEIR') or (seir_delta_aicc < 2)
 
         # Compute R² for SEIR
         ss_tot = np.sum((I_obs - np.mean(I_obs))**2)
         seir_r2 = 1 - valid_models['SEIR']['sse'] / ss_tot if ss_tot > 0 else 0
 
-        # Effect size: difference in AIC weights between SEIR and next best
-        other_weights = [w for k, w in aic_weights.items() if k != 'SEIR']
-        aic_effect_size = aic_weights.get('SEIR', 0) - max(other_weights) if other_weights else 0
+        # Effect size: difference in AICc weights between SEIR and next best
+        other_weights = [w for k, w in aicc_weights.items() if k != 'SEIR']
+        aicc_effect_size = aicc_weights.get('SEIR', 0) - max(other_weights) if other_weights else 0
 
         # --- Vuong test for non-nested model comparison ---
         # Find the best non-SEIR model that has fitted values
@@ -522,8 +522,8 @@ class HypothesisTester:
         n_obs = len(I_obs)
 
         if non_seir_with_fitted:
-            # Pick the best alternative (lowest AIC among non-SEIR)
-            alt_name, alt_info = min(non_seir_with_fitted, key=lambda x: x[1]['aic'])
+            # Pick the best alternative (lowest AICc among non-SEIR)
+            alt_name, alt_info = min(non_seir_with_fitted, key=lambda x: x[1]['aicc'])
 
             # Per-observation squared residuals
             seir_resid2 = (I_obs - valid_models['SEIR']['fitted'])**2
@@ -546,8 +546,8 @@ class HypothesisTester:
         else:
             # No alternative model with fitted values; fall back to AIC-based assessment
             vuong_stat = float('nan')
-            # Use chi2 survival function on AIC difference as approximate p-value
-            p_value = float(np.exp(-0.5 * abs(seir_delta_aic))) if seir_delta_aic <= 0 else 0.5
+            # Use chi2 survival function on AICc difference as approximate p-value
+            p_value = float(np.exp(-0.5 * abs(seir_delta_aicc))) if seir_delta_aicc <= 0 else 0.5
 
         # --- NRMSE-based confidence interval (replaces ad-hoc R^2 +/- 0.1) ---
         seir_resid2 = (I_obs - valid_models['SEIR']['fitted'])**2
@@ -572,7 +572,7 @@ class HypothesisTester:
         return HypothesisResult(
             hypothesis="H1",
             description="FOMO episodes follow SEIR epidemic dynamics (vs alternative models)",
-            test_statistic=seir_aic,
+            test_statistic=seir_aicc,
             p_value=float(p_value),
             effect_size=effect_size,
             confidence_interval=(ci_lo, ci_hi),
@@ -580,16 +580,16 @@ class HypothesisTester:
             alpha=self.alpha,
             sample_size=len(t),
             additional_metrics={
-                'model_comparison': {k: {'aic': v['aic'], 'sse': v['sse']}
+                'model_comparison': {k: {'aicc': v['aicc'], 'sse': v['sse']}
                                     for k, v in valid_models.items()},
-                'aic_weights': aic_weights,
+                'aicc_weights': aicc_weights,
                 'best_model': best_model,
                 'seir_r_squared': seir_r2,
-                'seir_delta_aic': seir_delta_aic,
+                'seir_delta_aicc': seir_delta_aicc,
                 'vuong_statistic': float(vuong_stat) if not np.isnan(vuong_stat) else float('nan'),
                 'vuong_alternative': alt_name if non_seir_with_fitted else None,
                 'nrmse': float(nrmse),
-                'aic_weight_effect_size': float(aic_effect_size),
+                'aicc_weight_effect_size': float(aicc_effect_size),
                 'fitting_diagnostics': fitting_diagnostics,
                 'data_quality': {
                     'n_observations': len(t),
@@ -597,7 +597,7 @@ class HypothesisTester:
                     'variance': float(np.var(I_obs)),
                     'range': (float(I_obs.min()), float(I_obs.max()))
                 },
-                'interpretation': f"SEIR {'is' if seir_supported else 'is NOT'} the best model (ΔAIC={seir_delta_aic:.2f}, Vuong p={p_value:.4f})"
+                'interpretation': f"SEIR {'is' if seir_supported else 'is NOT'} the best model (ΔAICc={seir_delta_aicc:.2f}, Vuong p={p_value:.4f})"
             }
         )
 

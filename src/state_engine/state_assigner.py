@@ -81,7 +81,8 @@ class StateAssigner:
         min_usd_value: float = 100.0,
         infected_z_threshold: float = 1.5,
         exposure_timeout_days: int = 14,
-        spontaneous_infection_rate: float = 0.001
+        spontaneous_infection_rate: float = 0.001,
+        random_seed: int = 42
     ):
         """
         Initialize state assigner.
@@ -104,6 +105,7 @@ class StateAssigner:
                 SUSCEPTIBLE wallet buying BTC becomes INFECTED without
                 contact with an infected neighbor (importation from outside
                 the observed network). Range [0, 1].
+            random_seed: Random seed for reproducibility of stochastic processes.
         """
         self.susceptible_window = timedelta(days=susceptible_window_days)
         self.exposure_window = timedelta(hours=exposure_window_hours)
@@ -116,7 +118,7 @@ class StateAssigner:
         self.spontaneous_infection_rate = spontaneous_infection_rate
 
         # RNG for stochastic processes (spontaneous infection)
-        self.rng = np.random.default_rng(42)
+        self.rng = np.random.default_rng(random_seed)
 
         # State tracking
         self.wallet_states: Dict[int, State] = {}
@@ -287,23 +289,31 @@ class StateAssigner:
             (flows['date'] >= window_start) &
             (flows['date'] <= current_date)
         ]
-        
+
         # Aggregate net flow per wallet in window
         wallet_net_flow = recent_flows.groupby('wallet_id')['net_btc'].sum().to_dict()
-        
+
+        # Precompute per-wallet historical mean/std for z-score classification
+        historical_flows = flows[flows['date'] <= current_date]
+        wallet_stats = historical_flows.groupby('wallet_id')['net_btc'].agg(['mean', 'std']).fillna(0)
+        wallet_mean_dict = wallet_stats['mean'].to_dict()
+        wallet_std_dict = wallet_stats['std'].to_dict()
+
         # Get all wallets
         all_wallets = set(G.nodes())
-        
+
         # Identify currently infected wallets for exposure check
         infected_wallets = {
-            w for w, s in previous_states.items() 
+            w for w, s in previous_states.items()
             if s == State.INFECTED
         }
-        
+
         for wallet in all_wallets:
             prev_state = previous_states.get(wallet, State.SUSCEPTIBLE)
             net_flow = wallet_net_flow.get(wallet, 0)
-            is_buying = net_flow > self.infected_threshold
+            wallet_mean = wallet_mean_dict.get(wallet, 0.0)
+            wallet_std = wallet_std_dict.get(wallet, 0.0)
+            is_buying = self._is_buying_zscore(net_flow, wallet_mean, wallet_std)
             
             # State transition logic
             new_state = self._compute_new_state(

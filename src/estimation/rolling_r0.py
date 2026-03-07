@@ -81,7 +81,7 @@ def estimate_rolling_r0(
 
         try:
             est = estimator.estimate(
-                window, N=N, fgi_values=fgi_window, n_bootstrap=0
+                window, N=N, fgi_values=fgi_window
             )
             if est.success:
                 r0 = est.beta / est.gamma if est.gamma > 0 else np.inf

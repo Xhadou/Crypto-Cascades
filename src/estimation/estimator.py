@@ -359,6 +359,9 @@ class ParameterEstimator:
 
             bootstrap_df = obs_fracs.iloc[indices].reset_index(drop=True)
 
+            # Resample FGI with same indices to maintain temporal alignment
+            fgi_boot = fgi_values[indices] if fgi_values is not None else None
+
             # Re-estimate from block-bootstrapped series
             initial = {
                 'beta': result.beta,
@@ -369,7 +372,7 @@ class ParameterEstimator:
 
             try:
                 boot_result = self._estimate_lsq(
-                    bootstrap_df, N, fgi_values, initial
+                    bootstrap_df, N, fgi_boot, initial
                 )
                 if boot_result.success:
                     bootstrap_betas.append(boot_result.beta)

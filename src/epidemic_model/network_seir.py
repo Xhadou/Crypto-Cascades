@@ -506,18 +506,22 @@ class NetworkSEIR:
             )
             return None
 
-        # Extract incidence (new infections per time step)
+        # Extract I and R counts for proper incidence calculation
         if 'I' in state_df.columns:
             I = np.asarray(state_df['I'].values, dtype=float)
+            R = np.asarray(state_df['R'].values, dtype=float) if 'R' in state_df.columns else np.zeros(len(I))
         elif 'I_frac' in state_df.columns:
             N_assumed = 10000
             I = np.asarray(state_df['I_frac'].values, dtype=float) * N_assumed
+            R = np.asarray(state_df['R_frac'].values, dtype=float) * N_assumed if 'R_frac' in state_df.columns else np.zeros(len(I))
         else:
             self.logger.error("Cannot find infection data in state_df")
             return None
 
-        # Compute incidence as change in infected count, clipped to non-negative
-        incidence = np.diff(I)
+        # Incidence = d(I+R)/dt ≈ σE (new infections entering I from E)
+        # Using diff(I) alone gives σE - γI which subtracts recoveries,
+        # biasing R(t) downward. diff(I+R) = σE - ωR ≈ σE when ω is small.
+        incidence = np.diff(I + R)
         incidence = np.maximum(incidence, 0)
 
         if incidence.sum() <= 0:
