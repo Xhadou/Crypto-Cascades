@@ -28,6 +28,13 @@ try:
 except ImportError:
     HAS_NETWORKIT = False
 
+# Try to import igraph for fast clustering on large graphs
+try:
+    import igraph as ig  # type: ignore
+    HAS_IGRAPH = True
+except ImportError:
+    HAS_IGRAPH = False
+
 
 class NetworkMetrics:
     """Compute network metrics and centrality measures."""
@@ -81,6 +88,30 @@ class NetworkMetrics:
         bc.run()
         scores = bc.scores()
         return {reverse_map[i]: scores[i] for i in range(len(scores))}
+
+    def _nx_to_igraph(
+        self,
+        G: Union[nx.Graph, nx.DiGraph]
+    ) -> 'ig.Graph':
+        """Convert NetworkX graph to igraph via edge list.
+
+        Building from an edge list is significantly faster than
+        ``ig.Graph.from_networkx()`` for graphs with millions of nodes
+        because it avoids serializing per-node/per-edge attribute dicts.
+
+        Args:
+            G: NetworkX graph (directed or undirected).
+
+        Returns:
+            An igraph Graph with the same topology (attributes are not copied).
+        """
+        node_list = list(G.nodes())
+        node_to_idx = {n: i for i, n in enumerate(node_list)}
+        edges = [(node_to_idx[u], node_to_idx[v]) for u, v in G.edges()]
+        ig_graph = ig.Graph(
+            n=len(node_list), edges=edges, directed=G.is_directed()
+        )
+        return ig_graph
 
     def compute_centrality_measures(
         self,
@@ -181,20 +212,26 @@ class NetworkMetrics:
                 except Exception as e:
                     self.logger.warning(f"Closeness failed: {e}")
         
-        # Eigenvector centrality (can fail on some graphs)
+        # Eigenvector centrality (can fail on some graphs, hangs on large ones)
         if 'eigenvector' in measures:
-            self.logger.info("  Computing eigenvector centrality...")
-            try:
-                if G.is_directed():
-                    results['eigenvector'] = nx.eigenvector_centrality(
-                        G, max_iter=1000, tol=1e-6
-                    )
-                else:
-                    results['eigenvector'] = nx.eigenvector_centrality(
-                        G, max_iter=1000
-                    )
-            except Exception as e:
-                self.logger.warning(f"Eigenvector centrality failed: {e}")
+            if n_nodes > self.large_graph_nodes:
+                self.logger.warning(
+                    f"Eigenvector centrality on {n_nodes:,} nodes is too "
+                    f"expensive (power iteration scales poorly). Skipping."
+                )
+            else:
+                self.logger.info("  Computing eigenvector centrality...")
+                try:
+                    if G.is_directed():
+                        results['eigenvector'] = nx.eigenvector_centrality(
+                            G, max_iter=1000, tol=1e-6
+                        )
+                    else:
+                        results['eigenvector'] = nx.eigenvector_centrality(
+                            G, max_iter=1000
+                        )
+                except Exception as e:
+                    self.logger.warning(f"Eigenvector centrality failed: {e}")
         
         return results
     
@@ -215,6 +252,61 @@ class NetworkMetrics:
         df.index.name = 'node_id'
         return df.reset_index()
     
+    def _compute_clustering_networkit(
+        self,
+        G: Union[nx.Graph, nx.DiGraph],
+    ) -> Dict[str, float]:
+        """Use NetworKit for clustering (parallel C++, fastest option).
+
+        NetworKit uses OpenMP to parallelise triangle counting across all
+        available CPU cores, making it the fastest option for very large
+        graphs (30M+ nodes).
+        """
+        directed = G.is_directed()
+        nk_graph, node_map = nk.nxadapter.nx2nk(G, weightAttr=None)
+
+        # NetworKit needs undirected for clustering
+        if directed:
+            nk_graph = nk_graph.toUndirected()
+
+        self.logger.info("  Computing global clustering (NetworKit)...")
+        gc = nk.globals.ClusteringCoefficient.exactGlobal(nk_graph)
+
+        self.logger.info("  Computing local clustering (NetworKit)...")
+        lcc = nk.centrality.LocalClusteringCoefficient(nk_graph, turbo=True)
+        lcc.run()
+        scores = lcc.scores()
+        # Average, treating NaN (isolated nodes) as 0
+        valid = [s for s in scores if s == s]  # filter NaN
+        avg_local = sum(valid) / len(valid) if valid else 0.0
+
+        return {
+            'transitivity': gc,
+            'avg_local_clustering': avg_local,
+            'clustering_sampled': False,
+        }
+
+    def _compute_clustering_igraph(
+        self,
+        G: Union[nx.Graph, nx.DiGraph],
+    ) -> Dict[str, float]:
+        """Use igraph for clustering (single-threaded C, fast fallback)."""
+        ig_graph = self._nx_to_igraph(G)
+        if ig_graph.is_directed():
+            ig_graph = ig_graph.as_undirected()
+
+        self.logger.info("  Computing transitivity (igraph)...")
+        transitivity = ig_graph.transitivity_undirected()
+
+        self.logger.info("  Computing avg local clustering (igraph)...")
+        avg_local = ig_graph.transitivity_avglocal_undirected(mode="zero")
+
+        return {
+            'transitivity': transitivity,
+            'avg_local_clustering': avg_local,
+            'clustering_sampled': False,
+        }
+
     def compute_clustering_coefficients(
         self,
         G: Union[nx.Graph, nx.DiGraph],
@@ -222,11 +314,17 @@ class NetworkMetrics:
     ) -> Dict[str, float]:
         """
         Compute clustering coefficients.
-        
+
+        Uses the best available backend for performance:
+          1. **NetworKit** (parallel C++, fastest) — if installed
+          2. **igraph** (single-threaded C) — if installed
+          3. **NetworkX** (pure Python, with sampling) — last resort
+
         Args:
             G: NetworkX graph
             sample_size: For large graphs, sample this many nodes for clustering
-            
+                         (only used in the NetworkX fallback path)
+
         Returns:
             Dict with global and average local clustering coefficients
         """
@@ -234,40 +332,71 @@ class NetworkMetrics:
             sample_size = self.clustering_sample
 
         self.logger.info("Computing clustering coefficients...")
+        n_nodes = G.number_of_nodes()
+        results = {}
 
-        # Convert to undirected for clustering
+        # ── Tier 1: NetworKit (parallel C++, fastest) ──
+        if HAS_NETWORKIT and n_nodes > self.large_graph_nodes:
+            self.logger.info(
+                f"Using NetworKit (parallel C++) for {n_nodes:,} node graph"
+            )
+            try:
+                return self._compute_clustering_networkit(G)
+            except Exception as e:
+                self.logger.warning(
+                    f"NetworKit clustering failed: {e}. Trying igraph..."
+                )
+
+        # ── Tier 2: igraph (single-threaded C) ──
+        if HAS_IGRAPH and n_nodes > self.large_graph_nodes:
+            self.logger.info(
+                f"Using igraph (C backend) for {n_nodes:,} node graph"
+            )
+            try:
+                return self._compute_clustering_igraph(G)
+            except Exception as e:
+                self.logger.warning(
+                    f"igraph clustering failed, falling back to NetworkX: {e}"
+                )
+
+        # ── Tier 3: NetworkX (pure Python, fine for small graphs) ──
         if G.is_directed():
             G_undirected = G.to_undirected()
         else:
             G_undirected = G
 
-        results = {}
         n_nodes = G_undirected.number_of_nodes()
 
-        # Average local clustering coefficient
-        # For large graphs, use sampling to avoid O(n*k^2) complexity
         try:
             if n_nodes > sample_size:
-                self.logger.info(f"Large graph ({n_nodes:,} nodes) - sampling {sample_size:,} nodes for clustering")
+                self.logger.info(
+                    f"Large graph ({n_nodes:,} nodes) - sampling "
+                    f"{sample_size:,} nodes for clustering"
+                )
                 import random
-                sample_nodes = random.sample(list(G_undirected.nodes()), sample_size)
-                results['avg_local_clustering'] = nx.average_clustering(G_undirected, nodes=sample_nodes)
+                sample_nodes = random.sample(
+                    list(G_undirected.nodes()), sample_size
+                )
+                results['avg_local_clustering'] = nx.average_clustering(
+                    G_undirected, nodes=sample_nodes
+                )
                 results['clustering_sampled'] = True
             else:
-                results['avg_local_clustering'] = nx.average_clustering(G_undirected)
+                results['avg_local_clustering'] = nx.average_clustering(
+                    G_undirected
+                )
                 results['clustering_sampled'] = False
         except Exception as e:
             self.logger.warning(f"Local clustering failed: {e}")
             results['avg_local_clustering'] = None
             results['clustering_sampled'] = None
-        
-        # Global clustering (transitivity) - this is fast even for large graphs
+
         try:
             results['transitivity'] = nx.transitivity(G_undirected)
         except Exception as e:
             self.logger.warning(f"Transitivity failed: {e}")
             results['transitivity'] = None
-        
+
         return results
     
     def fit_power_law(
@@ -401,15 +530,25 @@ class NetworkMetrics:
             Dict with small-world metrics
         """
         self.logger.info("Computing small-world coefficient...")
-        
+
         n = G.number_of_nodes()
         m = G.number_of_edges()
-        
-        if n > self.max_nodes_centrality:
+
+        # Hard guard: average_shortest_path_length is O(V*E) and will hang
+        # on large graphs.  The existing warning at max_nodes_centrality
+        # only logged but did not bail out.
+        if n > self.large_graph_nodes:
             self.logger.warning(
-                f"Small-world calculation on {n:,} nodes is expensive. "
-                "Consider using a smaller sample."
+                f"Small-world coefficient on {n:,} nodes requires all-pairs "
+                f"shortest paths. Skipping "
+                f"(max supported: {self.large_graph_nodes:,} nodes)."
             )
+            return {
+                'error': (
+                    f'Graph too large ({n:,} nodes) for small-world '
+                    f'computation'
+                )
+            }
         
         # Convert to undirected
         if G.is_directed():

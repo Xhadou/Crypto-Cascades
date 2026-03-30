@@ -141,9 +141,13 @@ class TrustNetworkValidator:
         else:
             ks_stat, ks_p = float('nan'), float('nan')
 
-        snap_undirected = snap_graph.to_undirected()
-        snap_clustering = nx.average_clustering(snap_undirected)
-        orb_clustering = nx.average_clustering(orbitaal_graph)
+        # Use NetworkMetrics for clustering (auto-selects best backend)
+        from src.network_analysis.metrics import NetworkMetrics
+        _metrics = NetworkMetrics()
+        snap_cc = _metrics.compute_clustering_coefficients(snap_graph)
+        snap_clustering = snap_cc.get('avg_local_clustering', 0.0) or 0.0
+        orb_cc = _metrics.compute_clustering_coefficients(orbitaal_graph)
+        orb_clustering = orb_cc.get('avg_local_clustering', 0.0) or 0.0
 
         snap_density = nx.density(snap_graph)
         orb_density = nx.density(orbitaal_graph)
