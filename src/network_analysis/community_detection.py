@@ -136,12 +136,24 @@ class CommunityDetector:
 
         self.logger.info("Detecting communities using Leiden algorithm...")
 
-        # Convert to undirected
-        if G.is_directed():
-            G = G.to_undirected()
+        # Build igraph directly from edge list — avoids ig.Graph.from_networkx()
+        # which copies all Python attributes one-by-one (very slow and memory-hungry).
+        # We also skip creating a full undirected NetworkX copy by handling
+        # directionality in igraph instead.
+        import gc
+        node_list = list(G.nodes())
+        node_to_idx = {n: i for i, n in enumerate(node_list)}
 
-        # Convert NetworkX graph to igraph
-        ig_graph = ig.Graph.from_networkx(G)
+        if G.is_directed():
+            edges = [(node_to_idx[u], node_to_idx[v]) for u, v in G.edges()]
+            ig_graph = ig.Graph(n=len(node_list), edges=edges, directed=True)
+            ig_graph = ig_graph.as_undirected()
+        else:
+            edges = [(node_to_idx[u], node_to_idx[v]) for u, v in G.edges()]
+            ig_graph = ig.Graph(n=len(node_list), edges=edges, directed=False)
+
+        del edges
+        gc.collect()
 
         # Run Leiden algorithm with modularity optimisation.
         # RBConfigurationVertexPartition is the resolution-aware variant
@@ -158,7 +170,10 @@ class CommunityDetector:
         nx_partition = {}
         for comm_id, members in enumerate(partition):
             for node_idx in members:
-                nx_partition[ig_graph.vs[node_idx]['_nx_name']] = comm_id
+                nx_partition[node_list[node_idx]] = comm_id
+
+        del ig_graph, node_list, node_to_idx
+        gc.collect()
 
         modularity = partition.modularity
         n_communities = len(partition)
