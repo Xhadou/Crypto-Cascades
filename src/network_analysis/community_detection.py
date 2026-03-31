@@ -143,10 +143,13 @@ class CommunityDetector:
         # Convert NetworkX graph to igraph
         ig_graph = ig.Graph.from_networkx(G)
 
-        # Run Leiden algorithm with modularity optimisation
+        # Run Leiden algorithm with modularity optimisation.
+        # RBConfigurationVertexPartition is the resolution-aware variant
+        # of modularity (ModularityVertexPartition does not accept
+        # resolution_parameter).
         partition = leidenalg.find_partition(
             ig_graph,
-            leidenalg.ModularityVertexPartition,
+            leidenalg.RBConfigurationVertexPartition,
             resolution_parameter=resolution,
             seed=random_state,
         )

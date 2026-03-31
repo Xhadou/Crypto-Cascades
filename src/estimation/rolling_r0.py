@@ -53,14 +53,18 @@ def estimate_rolling_r0(
     """
     if window_days < 10:
         raise ConfigurationError(
-            f"window_days={window_days} is too small; need at least 10 "
-            "data points for a meaningful SEIR fit."
+            key="window_days",
+            reason=(
+                f"{window_days} is too small; need at least 10 "
+                "data points for a meaningful SEIR fit."
+            ),
         )
 
     if len(state_data) < window_days:
         raise InsufficientDataError(
-            f"state_data has {len(state_data)} rows but window_days="
-            f"{window_days}; need at least window_days rows."
+            required=window_days,
+            available=len(state_data),
+            data_type="rows",
         )
 
     estimator = ParameterEstimator(

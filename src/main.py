@@ -407,6 +407,9 @@ class CryptoCascadesPipeline:
                 builder = GraphBuilder()
                 self._graph = builder.build_transaction_graph(df)
                 self.logger.info(f"Built graph: {self._graph.number_of_nodes():,} nodes, {self._graph.number_of_edges():,} edges")
+                # Free the DataFrame to reclaim ~3-4 GB before analysis
+                del df
+                import gc; gc.collect()
             else:
                 self.run_preprocess()
         

@@ -58,6 +58,53 @@ Wallets are classified into SEIR compartments based on observable on-chain behav
 - **Infected (I):** Net BTC inflow exceeds a z-score threshold (default: 1.5σ above wallet mean), replacing the prior binary threshold. Spontaneous infection (importation) is also supported.
 - **Recovered (R):** Dormant for 3+ days following an Infected phase. Returns to Susceptible after 30 days (waning immunity).
 
+#### High-Level State Loop
+
+```mermaid
+flowchart LR
+	S[Susceptible S] -->|contact with infected, not yet buying| E[Exposed E]
+	E -->|starts buying| I[Infected I]
+	I -->|dormant for recovery window| R[Recovered R]
+	R -->|immunity wanes| S
+
+	S -->|direct/spontaneous infection while buying| I
+	E -->|exposure timeout, no infection| S
+```
+
+#### Detailed Transition Decision Tree
+
+```mermaid
+flowchart TD
+	A[Start: previous state] --> B{State?}
+
+	B -->|S| S1{is_buying?}
+	S1 -->|No| S2{has infected neighbor?}
+	S2 -->|Yes| S3[S -> E\nset exposure_start_time]
+	S2 -->|No| S4[S -> S]
+
+	S1 -->|Yes| S5{random < spontaneous_rate?}
+	S5 -->|Yes| S6[S -> I]
+	S5 -->|No| S7{has infected neighbor?}
+	S7 -->|Yes| S8[S -> I]
+	S7 -->|No| S9[S -> S]
+
+	B -->|E| E1{is_buying?}
+	E1 -->|Yes| E2[E -> I\nset infection_time and last_buying_activity]
+	E1 -->|No| E3{days since exposure > timeout?}
+	E3 -->|Yes| E4[E -> S\nclear exposure_start_time]
+	E3 -->|No| E5[E -> E]
+
+	B -->|I| I1{is_buying?}
+	I1 -->|Yes| I2[I -> I\nupdate last_buying_activity]
+	I1 -->|No| I3{days dormant >= recovery_window?}
+	I3 -->|Yes| I4[I -> R\nset recovery_time]
+	I3 -->|No| I5[I -> I]
+
+	B -->|R| R1{days since recovery > immunity_waning?}
+	R1 -->|Yes| R2[R -> S]
+	R1 -->|No| R3[R -> R]
+```
+
 ### SEIR Dynamics
 
 The mean-field ODE system with sigmoidal FOMO amplification, solved using `scipy.integrate.solve_ivp` (RK45):

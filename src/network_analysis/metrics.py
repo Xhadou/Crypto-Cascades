@@ -264,10 +264,13 @@ class NetworkMetrics:
         """
         directed = G.is_directed()
         nk_graph, node_map = nk.nxadapter.nx2nk(G, weightAttr=None)
+        del node_map  # not needed, free memory
 
         # NetworKit needs undirected for clustering
         if directed:
-            nk_graph = nk_graph.toUndirected()
+            nk_directed = nk_graph
+            nk_graph = nk_directed.toUndirected()
+            del nk_directed
 
         self.logger.info("  Computing global clustering (NetworKit)...")
         gc = nk.globals.ClusteringCoefficient.exactGlobal(nk_graph)
@@ -276,6 +279,8 @@ class NetworkMetrics:
         lcc = nk.centrality.LocalClusteringCoefficient(nk_graph, turbo=True)
         lcc.run()
         scores = lcc.scores()
+        del nk_graph, lcc  # free C++ graph before averaging
+
         # Average, treating NaN (isolated nodes) as 0
         valid = [s for s in scores if s == s]  # filter NaN
         avg_local = sum(valid) / len(valid) if valid else 0.0
@@ -293,13 +298,17 @@ class NetworkMetrics:
         """Use igraph for clustering (single-threaded C, fast fallback)."""
         ig_graph = self._nx_to_igraph(G)
         if ig_graph.is_directed():
-            ig_graph = ig_graph.as_undirected()
+            ig_directed = ig_graph
+            ig_graph = ig_directed.as_undirected()
+            del ig_directed
 
         self.logger.info("  Computing transitivity (igraph)...")
         transitivity = ig_graph.transitivity_undirected()
 
         self.logger.info("  Computing avg local clustering (igraph)...")
         avg_local = ig_graph.transitivity_avglocal_undirected(mode="zero")
+
+        del ig_graph  # free C graph copy
 
         return {
             'transitivity': transitivity,

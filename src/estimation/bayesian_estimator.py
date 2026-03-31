@@ -189,14 +189,18 @@ class BayesianEstimator:
 
         T = obs_matrix.shape[0]
 
-        # Use the first observed row as initial condition
+        # Use the first observed row as initial condition, normalised
+        # to ensure compartment fractions sum to 1 (guards against
+        # floating-point drift or observation noise).
         y0 = obs_matrix[0]
+        y0 = y0 / jnp.sum(y0)
         predicted = BayesianEstimator._solve_seir_jax(
             beta, sigma, gamma, omega, y0, N, T
         )
 
-        # Observation noise concentration
-        concentration = numpyro.sample("concentration", dist.Gamma(10, 0.1))
+        # Observation noise concentration — a permissive prior avoids
+        # initialisation failures (mean = 2/0.1 = 20).
+        concentration = numpyro.sample("concentration", dist.Gamma(2, 0.1))
 
         # Dirichlet likelihood for each time step
         for t in range(T):
