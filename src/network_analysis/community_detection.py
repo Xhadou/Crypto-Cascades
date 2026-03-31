@@ -62,13 +62,15 @@ class CommunityDetector:
 
         self.logger.info("Detecting communities using Louvain algorithm...")
 
-        # Convert to undirected
+        # Convert to undirected — use a view to avoid copying ~8 GB
         if G.is_directed():
-            G = G.to_undirected()
+            G_undirected = G.to_undirected(as_view=True)
+        else:
+            G_undirected = G
 
         # Run Louvain algorithm (returns a list of sets)
         communities_list = nx.community.louvain_communities(
-            G,
+            G_undirected,
             resolution=resolution,
             seed=random_state
         )
@@ -80,7 +82,7 @@ class CommunityDetector:
                 partition[node] = comm_id
 
         # Calculate modularity
-        modularity = nx.community.modularity(G, communities_list)
+        modularity = nx.community.modularity(G_undirected, communities_list)
         
         # Count community sizes
         community_sizes = {}

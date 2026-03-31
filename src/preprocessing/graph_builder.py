@@ -212,32 +212,33 @@ class GraphBuilder:
         Returns:
             Filtered graph (copy of original)
         """
-        G = G.copy()
         original_nodes = G.number_of_nodes()
         original_edges = G.number_of_edges()
-        
-        # Filter edges by weight and count
-        if min_weight > 0 or min_count > 0:
-            edges_to_remove = [
-                (u, v) for u, v, d in G.edges(data=True)
-                if d.get('weight', 0) < min_weight or d.get('count', 0) < min_count
-            ]
-            G.remove_edges_from(edges_to_remove)
-            
+
+        # Build a new filtered graph incrementally instead of copying the
+        # entire graph (~8 GB for 30M nodes) and then removing entries.
+        G_filtered = type(G)()  # same type (DiGraph or Graph)
+
+        for u, v, d in G.edges(data=True):
+            if min_weight > 0 and d.get('weight', 0) < min_weight:
+                continue
+            if min_count > 0 and d.get('count', 0) < min_count:
+                continue
+            G_filtered.add_edge(u, v, **d)
+
         # Filter nodes by degree
         if min_degree > 0:
-            degree_view = G.degree()  # type: ignore[operator]
             nodes_to_remove = [
-                node for node, degree in dict(degree_view).items()
+                node for node, degree in G_filtered.degree()
                 if degree < min_degree
             ]
-            G.remove_nodes_from(nodes_to_remove)
-        
+            G_filtered.remove_nodes_from(nodes_to_remove)
+
         self.logger.info(
-            f"Filtered graph: {original_nodes:,} -> {G.number_of_nodes():,} nodes, "
-            f"{original_edges:,} -> {G.number_of_edges():,} edges"
+            f"Filtered graph: {original_nodes:,} -> {G_filtered.number_of_nodes():,} nodes, "
+            f"{original_edges:,} -> {G_filtered.number_of_edges():,} edges"
         )
-        return G
+        return G_filtered
         
     def get_largest_component(
         self,
@@ -269,7 +270,10 @@ class GraphBuilder:
             return G
             
         largest = max(components, key=len)
-        result = G.subgraph(largest).copy()
+        # Use a frozen view rather than a full copy — saves ~8 GB
+        # for 30M-node graphs.  The subgraph view is read-only but
+        # sufficient for all downstream analysis.
+        result = G.subgraph(largest)
         
         self.logger.info(
             f"Extracted largest component: {len(largest):,} nodes "

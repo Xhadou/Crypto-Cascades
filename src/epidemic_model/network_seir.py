@@ -717,29 +717,46 @@ class NetworkSEIR:
             f"Running Gillespie simulation (N={G.number_of_nodes():,}, T={t_max})"
         )
 
-        # Validate graph connectivity
-        undirected_G = G.to_undirected() if G.is_directed() else G
-        if not nx.is_connected(undirected_G):
-            n_components = nx.number_connected_components(undirected_G)
-            self.logger.warning(
-                f"Graph is disconnected ({n_components} components). "
-                "Simulation may not reach all nodes."
-            )
+        # Validate graph connectivity — use nx.is_connected on a view,
+        # not G.to_undirected() which copies the entire graph (~8 GB).
+        if G.is_directed():
+            is_conn = nx.is_weakly_connected(G)
+            if not is_conn:
+                n_components = nx.number_weakly_connected_components(G)
+                self.logger.warning(
+                    f"Graph is disconnected ({n_components} components). "
+                    "Simulation may not reach all nodes."
+                )
+        else:
+            if not nx.is_connected(G):
+                n_components = nx.number_connected_components(G)
+                self.logger.warning(
+                    f"Graph is disconnected ({n_components} components). "
+                    "Simulation may not reach all nodes."
+                )
 
-        # Initialize node states
-        node_states = {node: State.SUSCEPTIBLE for node in G.nodes()}
-        for node in initial_infected:
-            if node in node_states:
-                node_states[node] = State.INFECTED
+        # Initialize node states — use defaultdict to avoid materialising
+        # a 30M-entry dict.  Only infected nodes are stored explicitly;
+        # everything else is implicitly SUSCEPTIBLE.
+        from collections import defaultdict
+        node_states = defaultdict(lambda: State.SUSCEPTIBLE)
+        infected_set = set(initial_infected) & set(G.nodes())
+        for node in infected_set:
+            node_states[node] = State.INFECTED
 
-        # Create efficient neighbor lookup
-        neighbors = {node: list(G.neighbors(node)) for node in G.nodes()}
+        # Reuse a pre-built neighbor map if the caller cached one on the
+        # graph object (see run_monte_carlo), otherwise build it once.
+        neighbors = getattr(G, '_cached_neighbors', None)
+        if neighbors is None:
+            self.logger.info("  Building neighbor lookup table...")
+            neighbors = {node: list(G.neighbors(node)) for node in G.nodes()}
 
         # Track nodes in each state for efficient rate calculation
-        S_nodes = set(n for n, s in node_states.items() if s == State.SUSCEPTIBLE)
-        E_nodes = set(n for n, s in node_states.items() if s == State.EXPOSED)
-        I_nodes = set(n for n, s in node_states.items() if s == State.INFECTED)
-        R_nodes = set(n for n, s in node_states.items() if s == State.RECOVERED)
+        all_nodes = set(G.nodes())
+        I_nodes = infected_set.copy()
+        S_nodes = all_nodes - I_nodes
+        E_nodes = set()
+        R_nodes = set()
 
         # Results storage
         results = []
@@ -917,7 +934,18 @@ class NetworkSEIR:
         self.logger.info(f"Running {n_simulations} Monte Carlo simulations...")
 
         all_results = []
-        nodes = list(G.nodes())
+        # Materialise the node list once (needed for rng.choice).
+        # Use a numpy array to avoid repeated list→array conversions.
+        nodes = np.array(list(G.nodes()))
+
+        # Pre-build the neighbor lookup ONCE and cache it on the graph
+        # so simulate_network_stochastic reuses it across all runs
+        # instead of rebuilding a 30M-entry dict each time.
+        if not hasattr(G, '_cached_neighbors'):
+            self.logger.info("  Pre-building neighbor lookup (once)...")
+            G._cached_neighbors = {
+                node: list(G.neighbors(node)) for node in G.nodes()
+            }
 
         # Spawn independent child seeds for each run
         from numpy.random import SeedSequence

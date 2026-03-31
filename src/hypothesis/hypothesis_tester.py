@@ -1390,12 +1390,17 @@ class HypothesisTester:
         n_bootstrap = 1000
         bootstrap_fracs = []
 
-        edges = list(G.edges())
+        # Pre-compute per-edge community match as a boolean array.
+        # This avoids materialising a new list of edge tuples per bootstrap
+        # iteration — only an integer index array is resampled.
+        edge_within = np.array([
+            node_to_community.get(u, -1) == node_to_community.get(v, -1)
+            for u, v in G.edges()
+        ])
+        n_edges = len(edge_within)
         for _ in range(n_bootstrap):
-            sample_edges = [edges[i] for i in self.rng.choice(len(edges), size=len(edges), replace=True)]
-            within = sum(1 for u, v in sample_edges
-                        if node_to_community.get(u, -1) == node_to_community.get(v, -1))
-            bootstrap_fracs.append(within / len(sample_edges))
+            idx = self.rng.choice(n_edges, size=n_edges, replace=True)
+            bootstrap_fracs.append(edge_within[idx].mean())
 
         ci_lower = np.percentile(bootstrap_fracs, 2.5)
         ci_upper = np.percentile(bootstrap_fracs, 97.5)

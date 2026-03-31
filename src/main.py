@@ -491,6 +491,11 @@ class CryptoCascadesPipeline:
             # Store reference and infection times for H4 hypothesis test
             self._state_assigner = assigner
             self._infection_times_df = assigner.get_infection_times_df()
+
+            # Free the transactions DataFrame — it's saved to parquet
+            # and no longer needed.  Recovers ~3-4 GB.
+            self._transactions = None
+            import gc; gc.collect()
         else:
             self._node_states = {}
             self._infection_times_df = pd.DataFrame(columns=['node', 'infection_time'])
@@ -579,8 +584,10 @@ class CryptoCascadesPipeline:
             
             # Use smaller subgraph for network simulations
             if N > 5000:
-                nodes_sample = self.rng.choice(list(self._graph.nodes()), 5000, replace=False)
-                G_sample = self._graph.subgraph(nodes_sample).copy()
+                nodes_sample = self.rng.choice(
+                    np.array(list(self._graph.nodes())), 5000, replace=False
+                )
+                G_sample = self._graph.subgraph(nodes_sample)  # read-only view, no copy
             else:
                 G_sample = self._graph
             
@@ -935,7 +942,8 @@ class CryptoCascadesPipeline:
         # Summary dashboard
         self.logger.info("Generating summary dashboard...")
         if self._node_states is None and self._graph is not None:
-            self._node_states = {n: State.SUSCEPTIBLE for n in self._graph.nodes()}
+            from collections import defaultdict
+            self._node_states = defaultdict(lambda: State.SUSCEPTIBLE)
         
         if self._node_states is None or self._hypothesis_results is None:
             self.logger.warning("Skipping dashboard due to missing data")
@@ -958,7 +966,7 @@ class CryptoCascadesPipeline:
                 # Sample subgraph for large networks to avoid hanging
                 if G_plot.number_of_nodes() > 5000:
                     sample_nodes = list(G_plot.nodes())[:5000]
-                    G_plot = G_plot.subgraph(sample_nodes).copy()
+                    G_plot = G_plot.subgraph(sample_nodes)  # read-only view, no copy
                     states_plot = {n: self._node_states.get(n, State.SUSCEPTIBLE) for n in G_plot.nodes()}
                     self.logger.info(f"Sampled subgraph to {G_plot.number_of_nodes()} nodes for visualization")
                 viz.plot_network_states(
