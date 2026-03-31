@@ -75,8 +75,14 @@ class NetworkMetrics:
             Dict mapping NetworkX node IDs to betweenness centrality scores.
         """
         directed = G.is_directed()
-        nk_graph, node_map = nk.nxadapter.nx2nk(G, weightAttr=None)
-        # node_map: dict mapping nx node -> nk node index
+        result = nk.nxadapter.nx2nk(G, weightAttr=None)
+        if isinstance(result, tuple):
+            nk_graph, node_map = result
+        else:
+            # Newer NetworKit: nodes keep their integer IDs.
+            # Build identity map from NetworkX node list.
+            nk_graph = result
+            node_map = {n: i for i, n in enumerate(G.nodes())}
         reverse_map = {v: k for k, v in node_map.items()}
 
         bc = nk.centrality.EstimateBetweenness(
@@ -263,8 +269,10 @@ class NetworkMetrics:
         graphs (30M+ nodes).
         """
         directed = G.is_directed()
-        nk_graph, node_map = nk.nxadapter.nx2nk(G, weightAttr=None)
-        del node_map  # not needed, free memory
+        # nx2nk returns (graph, node_map) in some NetworKit versions
+        # and just the graph in others.
+        result = nk.nxadapter.nx2nk(G, weightAttr=None)
+        nk_graph = result[0] if isinstance(result, tuple) else result
 
         # NetworKit needs undirected for clustering
         if directed:
