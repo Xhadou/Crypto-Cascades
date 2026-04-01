@@ -275,9 +275,13 @@ class NetworkMetrics:
         nk_graph = result[0] if isinstance(result, tuple) else result
 
         # NetworKit needs undirected for clustering
-        if directed:
+        if nk_graph.isDirected():
             nk_directed = nk_graph
-            nk_graph = nk_directed.toUndirected()
+            # API varies by version: toUndirected() or toUndirected()
+            try:
+                nk_graph = nk_directed.toUndirected()
+            except AttributeError:
+                nk_graph = nk.graphtools.toUndirected(nk_directed)
             del nk_directed
 
         self.logger.info("  Computing global clustering (NetworKit)...")
