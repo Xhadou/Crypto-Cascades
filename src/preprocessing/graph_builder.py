@@ -270,10 +270,12 @@ class GraphBuilder:
             return G
             
         largest = max(components, key=len)
-        # Use a frozen view rather than a full copy — saves ~8 GB
-        # for 30M-node graphs.  The subgraph view is read-only but
-        # sufficient for all downstream analysis.
-        result = G.subgraph(largest)
+        # For large graphs, return a read-only view to save ~8 GB.
+        # For small graphs, return a mutable copy (callers may modify).
+        if len(largest) > 100_000:
+            result = G.subgraph(largest)
+        else:
+            result = G.subgraph(largest).copy()
         
         self.logger.info(
             f"Extracted largest component: {len(largest):,} nodes "
