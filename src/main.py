@@ -213,11 +213,22 @@ class CryptoCascadesPipeline:
         self.logger.info("PHASE 1: DATA DOWNLOAD")
         self.logger.info("=" * 60)
         
-        # Download ORBITAAL samples
+        # Download ORBITAAL data
         orbitaal = OrbitaalDownloader(
             data_dir=self.config.get('data.raw_dir', 'data/raw/orbitaal')
         )
         orbitaal.download_samples()
+
+        # Download the full archive (daily snapshots recommended)
+        archive_type = self.config.get('data.orbitaal.archive_type', 'daily')
+        self.logger.info(f"Downloading ORBITAAL {archive_type} archive...")
+        try:
+            orbitaal.download_archive(archive_type)
+        except Exception as e:
+            self.logger.warning(
+                f"Could not download {archive_type} archive: {e}. "
+                f"Pipeline will use sample data or existing files."
+            )
         
         # Download SNAP networks
         snap = SNAPDownloader(
@@ -270,18 +281,28 @@ class CryptoCascadesPipeline:
                 # Extract date from filename: orbitaal-snapshot-date-2017-10-file-id-106.snappy.parquet
                 filename = pq_file.name
                 try:
-                    # Parse year-month from filename
+                    # Parse date from filename.
+                    # Daily:   orbitaal-snapshot-date-2017-10-15-file-id-106.snappy.parquet
+                    # Monthly: orbitaal-snapshot-date-2017-10-file-id-106.snappy.parquet
                     parts = filename.split('-')
                     year_idx = parts.index('date') + 1
                     year = int(parts[year_idx])
                     month = int(parts[year_idx + 1])
-                    file_date = f"{year}-{month:02d}-01"
-                    
+                    # Daily files have a third date component before 'file'
+                    day_part = parts[year_idx + 2] if len(parts) > year_idx + 2 else ''
+                    day = int(day_part) if day_part.isdigit() else 15
+                    file_date = f"{year}-{month:02d}-{day:02d}"
+
                     # Check if file's date is within requested range
-                    if file_date >= start[:7] + '-01' and file_date <= end:
-                        self.logger.info(f"Loading {filename} ({year}-{month:02d})...")
+                    if file_date >= start and file_date <= end:
+                        self.logger.info(f"Loading {filename} ({file_date})...")
                         df = pd.read_parquet(pq_file)
                         df = parser._standardize_columns(df)
+                        # Assign datetime from filename for snapshot files
+                        if 'datetime' not in df.columns and 'timestamp' not in df.columns:
+                            df['datetime'] = pd.Timestamp(file_date)
+                        elif 'timestamp' in df.columns and 'datetime' not in df.columns:
+                            df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
                         if not df.empty:
                             dfs.append(df)
                             self.logger.info(f"  Loaded {len(df):,} edges")
@@ -390,118 +411,187 @@ class CryptoCascadesPipeline:
         self.logger.info(f"Saved processed transactions to {output_file}")
         
     def run_analyze(self) -> None:
-        """Phase 3 & 4: Network analysis and state assignment."""
+        """Phase 3 & 4: Network analysis and state assignment.
+
+        Uses CheckpointManager to save progress after each expensive
+        step.  If a checkpoint exists and config/code haven't changed,
+        the step is loaded from disk instead of recomputed.
+        """
+        from src.utils.checkpoint import CheckpointManager
+        import gc
+
         self.logger.info("=" * 60)
         self.logger.info("PHASE 3-4: NETWORK ANALYSIS & STATE ASSIGNMENT")
         self.logger.info("=" * 60)
-        
-        if self._graph is None:
-            # Try to load from preprocessed file first
-            processed_file = self.output_dir / 'data' / 'processed_transactions.parquet'
-            if processed_file.exists():
-                self.logger.info(f"Loading preprocessed data from {processed_file}")
-                df = pd.read_parquet(processed_file)
-                self.logger.info(f"Loaded {len(df):,} transactions")
-                
-                # Rebuild graph from processed data
-                builder = GraphBuilder()
-                self._graph = builder.build_transaction_graph(df)
-                self.logger.info(f"Built graph: {self._graph.number_of_nodes():,} nodes, {self._graph.number_of_edges():,} edges")
-                # Keep df for state assignment (needs transaction data)
-                self._transactions = df
-            else:
-                self.run_preprocess()
-        
-        # Ensure graph is available after preprocessing
-        if self._graph is None:
-            self.logger.error("Failed to build graph during preprocessing")
-            return
-        
-        # Check for empty graph
-        if self._graph.number_of_nodes() == 0:
-            self.logger.error(
-                "Graph is empty - no transactions loaded. "
-                "Check that parquet files exist and match the date range."
+
+        cp = CheckpointManager(
+            self.output_dir / 'checkpoints',
+            Path('configs/config.yaml'),
+        )
+
+        # ── Step 1: Build or load graph (~2 h) ──────────────────────
+        if cp.has('graph'):
+            self.logger.info("Loading graph from checkpoint...")
+            self._graph = cp.load('graph')
+            self.logger.info(
+                f"Loaded graph: {self._graph.number_of_nodes():,} nodes, "
+                f"{self._graph.number_of_edges():,} edges"
             )
-            return
-        
-        # Network metrics
-        metrics = NetworkMetrics()
-        
-        self.logger.info("Computing network metrics...")
+            # Also need transactions for state assignment
+            processed_file = self.output_dir / 'data' / 'processed_transactions.parquet'
+            if self._transactions is None and processed_file.exists():
+                self._transactions = pd.read_parquet(processed_file)
+        else:
+            if self._graph is None:
+                processed_file = self.output_dir / 'data' / 'processed_transactions.parquet'
+                if processed_file.exists():
+                    self.logger.info(f"Loading preprocessed data from {processed_file}")
+                    df = pd.read_parquet(processed_file)
+                    self.logger.info(f"Loaded {len(df):,} transactions")
+                    builder = GraphBuilder()
+                    self._graph = builder.build_transaction_graph(df)
+                    self.logger.info(
+                        f"Built graph: {self._graph.number_of_nodes():,} nodes, "
+                        f"{self._graph.number_of_edges():,} edges"
+                    )
+                    self._transactions = df
+                else:
+                    self.run_preprocess()
+
+            if self._graph is None or self._graph.number_of_nodes() == 0:
+                self.logger.error(
+                    "Graph is empty or unavailable. "
+                    "Check that parquet files exist and match the date range."
+                )
+                return
+
+            cp.save('graph', self._graph, {
+                'nodes': self._graph.number_of_nodes(),
+                'edges': self._graph.number_of_edges(),
+            })
+
+        # ── Step 2: Clustering coefficients (~30 min) ───────────────
+        if cp.has('clustering'):
+            clustering = cp.load('clustering')
+            self.logger.info("Loaded clustering from checkpoint")
+        else:
+            metrics = NetworkMetrics()
+            self.logger.info("Computing network metrics...")
+            try:
+                clustering = metrics.compute_clustering_coefficients(self._graph)
+                cp.save('clustering', clustering)
+            except Exception as e:
+                self.logger.error(f"Clustering failed: {e}")
+                self.logger.info("Graph checkpoint preserved — re-run will skip graph build")
+                raise
+
+        avg_clustering = clustering.get('avg_local_clustering') or 0.0
         n_nodes = self._graph.number_of_nodes()
         n_edges = self._graph.number_of_edges()
         density = nx.density(self._graph)
-        clustering = metrics.compute_clustering_coefficients(self._graph)
-        
-        # Handle None from clustering computation
-        avg_clustering = clustering.get('avg_local_clustering')
-        if avg_clustering is None:
-            avg_clustering = 0.0
-        
+
         basic_stats = {
-            'n_nodes': n_nodes,
-            'n_edges': n_edges,
-            'density': density,
-            'avg_clustering': avg_clustering
+            'n_nodes': n_nodes, 'n_edges': n_edges,
+            'density': density, 'avg_clustering': avg_clustering,
         }
-        self.logger.info(f"  Nodes: {basic_stats['n_nodes']:,}")
-        self.logger.info(f"  Edges: {basic_stats['n_edges']:,}")
-        self.logger.info(f"  Density: {basic_stats['density']:.6f}")
-        self.logger.info(f"  Avg clustering: {basic_stats['avg_clustering']:.4f}")
-        
-        # Community detection (prefer Leiden when available)
-        detector = CommunityDetector()
-        if hasattr(detector, 'detect_communities_leiden'):
-            community_result = detector.detect_communities_leiden(self._graph)
+        self.logger.info(f"  Nodes: {n_nodes:,}")
+        self.logger.info(f"  Edges: {n_edges:,}")
+        self.logger.info(f"  Density: {density:.6f}")
+        self.logger.info(f"  Avg clustering: {avg_clustering:.4f}")
+
+        # ── Step 3: Community detection (~6 h) ──────────────────────
+        if cp.has('communities'):
+            community_result = cp.load('communities')
+            self.logger.info("Loaded communities from checkpoint")
         else:
-            community_result = detector.detect_communities_louvain(self._graph)
+            self.logger.info("Detecting communities...")
+            detector = CommunityDetector()
+            try:
+                if hasattr(detector, 'detect_communities_leiden'):
+                    community_result = detector.detect_communities_leiden(self._graph)
+                else:
+                    community_result = detector.detect_communities_louvain(self._graph)
+                cp.save('communities', community_result)
+            except Exception as e:
+                self.logger.error(f"Community detection failed: {e}")
+                self.logger.info("Graph + clustering checkpoints preserved")
+                raise
+
         communities = community_result['partition']
         modularity = community_result['modularity']
         n_communities = community_result['n_communities']
         self._community_partition = communities
-
         self.logger.info(f"  Communities: {n_communities}")
         self.logger.info(f"  Modularity: {modularity:.4f}")
-        
-        # State assignment
-        self.logger.info("Assigning SEIR states...")
-        assigner = StateAssigner(
-            susceptible_window_days=self.config.get('state_assignment.susceptible.no_buy_window_days', 7),
-            exposure_window_hours=self.config.get('state_assignment.exposed.contact_window_hours', 24),
-            infected_threshold=self.config.get('state_assignment.infected.net_positive_threshold', 0.0),
-            recovery_window_days=self.config.get('state_assignment.recovered.dormancy_window_days', 3),
-            infected_z_threshold=self.config.get('state_assignment.infected.z_threshold', 1.5),
-            exposure_timeout_days=self.config.get('state_assignment.exposed.timeout_days', 14),
-            spontaneous_infection_rate=self.config.get('state_assignment.infected.spontaneous_rate', 0.001),
-            random_seed=self.random_seed,
-        )
-        
-        # Compute wallet flows for state assignment
-        if self._graph is not None and self._transactions is not None:
-            flows = assigner.compute_wallet_flows(self._transactions, time_column='datetime' if 'datetime' in self._transactions.columns else 'timestamp')
-            state_df = assigner.run_state_assignment(
-                self._graph,
-                flows
-            )
-            # Convert to node states dict - get final state for each wallet
-            self._node_states = assigner.wallet_states
-            
-            # Store reference and infection times for H4 hypothesis test
-            self._state_assigner = assigner
-            self._infection_times_df = assigner.get_infection_times_df()
 
-            # Free the transactions DataFrame — it's saved to parquet
-            # and no longer needed.  Recovers ~3-4 GB.
-            self._transactions = None
-            import gc; gc.collect()
+        # ── Step 4: SEIR state assignment (~30 min) ─────────────────
+        if cp.has('states') and cp.has('infection_times'):
+            self._node_states = cp.load('states')
+            self._infection_times_df = cp.load('infection_times')
+            self.logger.info("Loaded SEIR states from checkpoint")
         else:
-            self._node_states = {}
-            self._infection_times_df = pd.DataFrame(columns=['node', 'infection_time'])
-        
+            self.logger.info("Assigning SEIR states...")
+            assigner = StateAssigner(
+                susceptible_window_days=self.config.get('state_assignment.susceptible.no_buy_window_days', 7),
+                exposure_window_hours=self.config.get('state_assignment.exposed.contact_window_hours', 24),
+                infected_threshold=self.config.get('state_assignment.infected.net_positive_threshold', 0.0),
+                recovery_window_days=self.config.get('state_assignment.recovered.dormancy_window_days', 3),
+                infected_z_threshold=self.config.get('state_assignment.infected.z_threshold', 1.5),
+                exposure_timeout_days=self.config.get('state_assignment.exposed.timeout_days', 14),
+                spontaneous_infection_rate=self.config.get('state_assignment.infected.spontaneous_rate', 0.001),
+                random_seed=self.random_seed,
+            )
+
+            if self._transactions is None:
+                self.logger.error(
+                    "No transaction data available for state assignment. "
+                    "Graph and community checkpoints are preserved."
+                )
+                self._node_states = {}
+                self._infection_times_df = pd.DataFrame(columns=['node', 'infection_time'])
+            else:
+                # Validate time column
+                time_col = next(
+                    (c for c in ['datetime', 'timestamp'] if c in self._transactions.columns),
+                    None,
+                )
+                if time_col is None:
+                    self.logger.error(
+                        f"No time column in transactions "
+                        f"(columns: {list(self._transactions.columns)}). "
+                        f"Download daily snapshots: python -m src.main --phase download"
+                    )
+                    self._node_states = {}
+                    self._infection_times_df = pd.DataFrame(columns=['node', 'infection_time'])
+                else:
+                    try:
+                        flows = assigner.compute_wallet_flows(
+                            self._transactions, time_column=time_col
+                        )
+                        state_df = assigner.run_state_assignment(self._graph, flows)
+                        self._node_states = assigner.wallet_states
+                        self._state_assigner = assigner
+                        self._infection_times_df = assigner.get_infection_times_df()
+                        cp.save('states', self._node_states)
+                        cp.save('infection_times', self._infection_times_df)
+                    except Exception as e:
+                        self.logger.error(f"State assignment failed: {e}")
+                        self.logger.info(
+                            "Graph + community checkpoints preserved — "
+                            "re-run will skip to state assignment"
+                        )
+                        self._node_states = {}
+                        self._infection_times_df = pd.DataFrame(columns=['node', 'infection_time'])
+
+            # Free transactions — saved to parquet, no longer needed
+            self._transactions = None
+            gc.collect()
+
+        # ── Log state distribution ──────────────────────────────────
         state_counts = {}
-        for state in self._node_states.values():
-            state_counts[state.value] = state_counts.get(state.value, 0) + 1
+        for state_val in self._node_states.values():
+            key = state_val.value if hasattr(state_val, 'value') else str(state_val)
+            state_counts[key] = state_counts.get(key, 0) + 1
 
         total_nodes = len(self._node_states)
         if total_nodes > 0:
@@ -511,18 +601,18 @@ class CryptoCascadesPipeline:
                 self.logger.info(f"  {state}: {count:,} ({pct:.1f}%)")
         else:
             self.logger.warning("No node states assigned")
-        
-        # Save analysis results
+
+        # ── Save final analysis results ─────────────────────────────
         analysis_results = {
             'basic_stats': basic_stats,
             'n_communities': n_communities,
             'modularity': modularity,
-            'state_distribution': state_counts
+            'state_distribution': state_counts,
         }
-        
         output_file = self.output_dir / 'data' / 'analysis_results.csv'
         pd.DataFrame([analysis_results]).to_csv(output_file, index=False)
         self.logger.info(f"Saved analysis results to {output_file}")
+        self.logger.info("Phase 3-4 complete.")
         
     def run_simulate(self, n_simulations: int = 100) -> None:
         """Phase 5: Run SEIR simulations."""

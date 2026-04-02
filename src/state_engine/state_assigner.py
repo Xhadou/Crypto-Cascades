@@ -161,7 +161,13 @@ class StateAssigner:
             DataFrame with wallet flows per day
         """
         if time_column not in df.columns:
-            raise ValueError(f"Column {time_column} not found")
+            raise ValueError(
+                f"Column '{time_column}' not found in transaction DataFrame. "
+                f"Available columns: {list(df.columns)}. "
+                f"Ensure data was preprocessed with daily snapshots "
+                f"(python -m src.main --phase download && "
+                f"python -m src.main --phase preprocess)."
+            )
             
         self.logger.info("Computing wallet flows...")
             
@@ -507,7 +513,11 @@ class StateAssigner:
             
         self.wallet_states = current_states
 
-        result_df = pd.DataFrame(state_counts)
+        if state_counts:
+            result_df = pd.DataFrame(state_counts)
+        else:
+            result_df = pd.DataFrame(columns=['date', 'datetime', 'S', 'E', 'I', 'R', 'total'])
+            self.logger.warning("State assignment produced no results (empty state_counts)")
 
         # Create a state history DataFrame that includes per-node infection times for H4 test
         self._node_infection_times_df = pd.DataFrame([
@@ -515,11 +525,14 @@ class StateAssigner:
             for node, time in self.infection_times.items()
         ])
 
-        self.logger.info(
-            f"State assignment complete. Final: S={result_df['S'].iloc[-1]}, "
-            f"E={result_df['E'].iloc[-1]}, I={result_df['I'].iloc[-1]}, "
-            f"R={result_df['R'].iloc[-1]}"
-        )
+        if len(result_df) > 0 and 'S' in result_df.columns:
+            self.logger.info(
+                f"State assignment complete. Final: S={result_df['S'].iloc[-1]}, "
+                f"E={result_df['E'].iloc[-1]}, I={result_df['I'].iloc[-1]}, "
+                f"R={result_df['R'].iloc[-1]}"
+            )
+        else:
+            self.logger.warning("State assignment completed but no time steps recorded")
 
         return result_df
 

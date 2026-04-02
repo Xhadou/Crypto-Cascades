@@ -9,6 +9,8 @@ data:
   # PRIMARY DATASET: ORBITAAL
   orbitaal:
     zenodo_base: "https://zenodo.org/records/12581515/files"
+    # Archive type: daily (recommended), monthly, hourly, or stream
+    archive_type: daily
     # Monthly snapshots (main analysis)
     monthly_archive: "orbitaal-snapshot-month.tar.gz"
     monthly_size_gb: 23
