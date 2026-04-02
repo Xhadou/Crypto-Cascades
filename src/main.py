@@ -264,8 +264,16 @@ class CryptoCascadesPipeline:
         
         orbitaal_dir = Path(self.config.get('data.raw_dir', 'data/raw/orbitaal'))
         
-        # Look for extracted parquet files first (monthly snapshots)
-        parquet_dir = orbitaal_dir / 'SNAPSHOT' / 'EDGES' / 'month'
+        # Look for extracted parquet files — prefer daily over monthly
+        archive_type = self.config.get('data.orbitaal.archive_type', 'daily')
+        parquet_dir = orbitaal_dir / 'SNAPSHOT' / 'EDGES' / archive_type
+        if not parquet_dir.exists():
+            # Fallback: try daily, then monthly
+            for fallback in ['day', 'daily', 'month', 'monthly']:
+                candidate = orbitaal_dir / 'SNAPSHOT' / 'EDGES' / fallback
+                if candidate.exists():
+                    parquet_dir = candidate
+                    break
         parquet_files = list(parquet_dir.glob('*.parquet')) if parquet_dir.exists() else []
         
         # Determine date range for filtering
