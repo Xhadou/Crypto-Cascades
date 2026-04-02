@@ -615,18 +615,25 @@ class CryptoCascadesPipeline:
         self.logger.info("Phase 3-4 complete.")
         
     def run_simulate(self, n_simulations: int = 100) -> None:
-        """Phase 5: Run SEIR simulations."""
+        """Phase 5: Run SEIR simulations (with checkpoints)."""
+        from src.utils.checkpoint import CheckpointManager
+
         self.logger.info("=" * 60)
         self.logger.info("PHASE 5: SEIR SIMULATION")
         self.logger.info("=" * 60)
-        
+
+        cp = CheckpointManager(
+            self.output_dir / 'checkpoints',
+            Path('configs/config.yaml'),
+        )
+
         if self._graph is None:
             self.run_analyze()
-        
+
         if self._graph is None:
             self.logger.error("Graph not available")
             return
-        
+
         # Initialize SEIR model with config parameters
         params = SEIRParameters(
             beta=self.config.get('seir.beta', 0.3),
@@ -636,60 +643,74 @@ class CryptoCascadesPipeline:
             fomo_alpha=self.config.get('seir.fomo_alpha', 1.0),
             fomo_enabled=True
         )
-        
         model = NetworkSEIR(params, random_seed=self.random_seed)
-        
-        # Compute network R0
-        r0_network = model.compute_network_r0(self._graph)
-        self.logger.info(f"Network R₀: {r0_network:.3f}")
-        
-        # Mean-field simulation
+
         N = self._graph.number_of_nodes()
-        initial_infected = max(1, int(N * 0.001))  # 0.1% initial
         t_max = self.config.get('simulation.t_max', 100)
-        
-        self.logger.info(f"Running mean-field simulation (N={N:,}, T={t_max})...")
-        if self._fgi_is_synthetic:
-            self.logger.warning(
-                "Simulation β-amplification is based on synthetic sentiment data"
-            )
         fgi_array: Optional[np.ndarray] = None
         if self._fgi_values is not None:
             fgi_array = np.asarray(self._fgi_values[:t_max])
-        self._seir_results = model.simulate_meanfield(
-            N=N,
-            initial_infected=initial_infected,
-            t_max=t_max,
-            fgi_values=fgi_array
-        )
-        
+
+        # ── Step 1: Mean-field simulation ───────────────────────────
+        if cp.has('seir_results'):
+            self._seir_results = cp.load('seir_results')
+            self.logger.info("Loaded SEIR results from checkpoint")
+        else:
+            # Compute network R0
+            r0_network = model.compute_network_r0(self._graph)
+            self.logger.info(f"Network R₀: {r0_network:.3f}")
+
+            initial_infected = max(1, int(N * 0.001))
+            self.logger.info(f"Running mean-field simulation (N={N:,}, T={t_max})...")
+            if self._fgi_is_synthetic:
+                self.logger.warning(
+                    "Simulation β-amplification is based on synthetic sentiment data"
+                )
+            try:
+                self._seir_results = model.simulate_meanfield(
+                    N=N,
+                    initial_infected=initial_infected,
+                    t_max=t_max,
+                    fgi_values=fgi_array
+                )
+                cp.save('seir_results', self._seir_results)
+            except Exception as e:
+                self.logger.error(f"Mean-field simulation failed: {e}")
+                raise
+
         peak_I = self._seir_results['I_frac'].max()
         peak_t = self._seir_results['I_frac'].idxmax()
         self.logger.info(f"Peak infected: {peak_I:.3f} at t={peak_t}")
-        
-        # Monte Carlo simulations
+
+        # ── Step 2: Monte Carlo simulations ─────────────────────────
         if n_simulations > 1:
-            self.logger.info(f"Running {n_simulations} Monte Carlo simulations...")
-            
-            # Use smaller subgraph for network simulations
-            if N > 5000:
-                nodes_sample = self.rng.choice(
-                    np.array(list(self._graph.nodes())), 5000, replace=False
-                )
-                G_sample = self._graph.subgraph(nodes_sample)  # read-only view, no copy
+            if cp.has('mc_results'):
+                self.logger.info("Loaded MC results from checkpoint")
             else:
-                G_sample = self._graph
-            
-            mc_results = model.run_monte_carlo(
-                G_sample,
-                initial_infected_count=max(1, int(G_sample.number_of_nodes() * 0.01)),
-                t_max=min(t_max, 50),
-                n_simulations=min(n_simulations, 20),  # Limit for speed
-                fgi_values=np.asarray(self._fgi_values[:50]) if self._fgi_values is not None else None
-            )
-            
-            self.logger.info(f"MC mean peak I: {mc_results['I_frac']['mean'].max():.3f}")
-        
+                self.logger.info(f"Running {n_simulations} Monte Carlo simulations...")
+                if N > 5000:
+                    nodes_sample = self.rng.choice(
+                        np.array(list(self._graph.nodes())), 5000, replace=False
+                    )
+                    G_sample = self._graph.subgraph(nodes_sample)
+                else:
+                    G_sample = self._graph
+
+                try:
+                    mc_results = model.run_monte_carlo(
+                        G_sample,
+                        initial_infected_count=max(1, int(G_sample.number_of_nodes() * 0.01)),
+                        t_max=min(t_max, 50),
+                        n_simulations=min(n_simulations, 20),
+                        fgi_values=np.asarray(self._fgi_values[:50]) if self._fgi_values is not None else None
+                    )
+                    self.logger.info(f"MC mean peak I: {mc_results['I_frac']['mean'].max():.3f}")
+                    # MC results are nested dicts with DataFrames — save as pickle
+                    cp.save('mc_results', mc_results)
+                except Exception as e:
+                    self.logger.warning(f"Monte Carlo simulation failed: {e}")
+                    self.logger.info("Mean-field results preserved in checkpoint")
+
         # Save simulation results
         output_file = self.output_dir / 'data' / 'seir_results.csv'
         self._seir_results.to_csv(output_file, index=False)
@@ -712,40 +733,56 @@ class CryptoCascadesPipeline:
             self.logger.warning(f"Early warning signal computation failed: {e}")
 
     def run_estimate(self) -> None:
-        """Phase 6: Parameter estimation."""
+        """Phase 6: Parameter estimation (with checkpoints)."""
+        from src.utils.checkpoint import CheckpointManager
+
         self.logger.info("=" * 60)
         self.logger.info("PHASE 6: PARAMETER ESTIMATION")
         self.logger.info("=" * 60)
-        
+
+        cp = CheckpointManager(
+            self.output_dir / 'checkpoints',
+            Path('configs/config.yaml'),
+        )
+
         if self._seir_results is None:
             self.run_simulate()
-        
+
         if self._graph is None or self._seir_results is None:
             self.logger.error("Graph or SEIR results not available")
             return
-        
-        # Estimate parameters from simulated data (as if observed)
-        estimator = ParameterEstimator(method='lsq', random_seed=self.random_seed)
-        
+
         N = self._graph.number_of_nodes()
-        
-        self.logger.info("Estimating SEIR parameters...")
-        if self._fgi_is_synthetic:
-            self.logger.warning(
-                "Parameter estimation using synthetic FGI data — "
-                "FOMO amplification estimates may not reflect real sentiment"
-            )
         fgi_array: Optional[np.ndarray] = None
         if self._fgi_values is not None:
             fgi_array = np.asarray(self._fgi_values)
-        self._estimated_params = estimator.estimate(
-            self._seir_results,
-            N=N,
-            fgi_values=fgi_array,
-            initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
-            n_bootstrap=50
-        )
-        
+
+        # ── Step 1: Parameter estimation ────────────────────────────
+        if cp.has('estimated_params'):
+            self._estimated_params = cp.load('estimated_params')
+            self.logger.info("Loaded estimated params from checkpoint")
+        else:
+            estimator = ParameterEstimator(method='lsq', random_seed=self.random_seed)
+            self.logger.info("Estimating SEIR parameters...")
+            if self._fgi_is_synthetic:
+                self.logger.warning(
+                    "Parameter estimation using synthetic FGI data — "
+                    "FOMO amplification estimates may not reflect real sentiment"
+                )
+            try:
+                self._estimated_params = estimator.estimate(
+                    self._seir_results,
+                    N=N,
+                    fgi_values=fgi_array,
+                    initial_guess={'beta': 0.25, 'sigma': 0.15, 'gamma': 0.08},
+                    n_bootstrap=50
+                )
+                cp.save('estimated_params', self._estimated_params)
+            except Exception as e:
+                self.logger.error(f"Parameter estimation failed: {e}")
+                self.logger.info("SEIR results checkpoint preserved")
+                raise
+
         self.logger.info(f"Estimated parameters:")
         self.logger.info(f"  β = {self._estimated_params.beta:.4f} "
                         f"95% CI [{self._estimated_params.beta_ci[0]:.4f}, "
@@ -754,23 +791,34 @@ class CryptoCascadesPipeline:
         self.logger.info(f"  γ = {self._estimated_params.gamma:.4f}")
         self.logger.info(f"  R₀ = {self._estimated_params.r0():.3f}")
         self.logger.info(f"  R² = {self._estimated_params.r_squared:.4f}")
-        
-        # Sensitivity analysis
-        self.logger.info("Running sensitivity analysis...")
-        sensitivity = estimator.sensitivity_analysis(
-            {'beta': self._estimated_params.beta,
-             'sigma': self._estimated_params.sigma,
-             'gamma': self._estimated_params.gamma},
-            self._seir_results,
-            N=N,
-            fgi_values=fgi_array
-        )
-        self._sensitivity_df = sensitivity
 
-        self.logger.info("Parameter sensitivities:")
-        for _, row in sensitivity.iterrows():
-            self.logger.info(f"  {row['parameter']}: elasticity = {row['elasticity']:.4f}")
-        
+        # ── Step 2: Sensitivity analysis ────────────────────────────
+        if cp.has('sensitivity'):
+            self._sensitivity_df = cp.load('sensitivity')
+            self.logger.info("Loaded sensitivity from checkpoint")
+        else:
+            estimator = ParameterEstimator(method='lsq', random_seed=self.random_seed)
+            self.logger.info("Running sensitivity analysis...")
+            try:
+                sensitivity = estimator.sensitivity_analysis(
+                    {'beta': self._estimated_params.beta,
+                     'sigma': self._estimated_params.sigma,
+                     'gamma': self._estimated_params.gamma},
+                    self._seir_results,
+                    N=N,
+                    fgi_values=fgi_array
+                )
+                self._sensitivity_df = sensitivity
+                cp.save('sensitivity', self._sensitivity_df)
+            except Exception as e:
+                self.logger.warning(f"Sensitivity analysis failed: {e}")
+                self._sensitivity_df = pd.DataFrame()
+
+        if not self._sensitivity_df.empty:
+            self.logger.info("Parameter sensitivities:")
+            for _, row in self._sensitivity_df.iterrows():
+                self.logger.info(f"  {row['parameter']}: elasticity = {row['elasticity']:.4f}")
+
         # Save estimation results
         output_file = self.output_dir / 'data' / 'estimated_params.csv'
         pd.DataFrame([{
@@ -782,56 +830,65 @@ class CryptoCascadesPipeline:
         }]).to_csv(output_file, index=False)
         
     def run_test(self, hypothesis: str = 'all') -> None:
-        """Phase 7: Hypothesis testing."""
+        """Phase 7: Hypothesis testing (with checkpoints for each H-test)."""
+        from src.utils.checkpoint import CheckpointManager
+
         self.logger.info("=" * 60)
         self.logger.info("PHASE 7: HYPOTHESIS TESTING")
         self.logger.info("=" * 60)
-        
+
+        cp = CheckpointManager(
+            self.output_dir / 'checkpoints',
+            Path('configs/config.yaml'),
+        )
+
         if self._estimated_params is None:
             self.run_estimate()
-        
+
         if self._seir_results is None or self._estimated_params is None or self._graph is None:
             self.logger.error("Required data not available for hypothesis testing")
             return
-        
+
         tester = HypothesisTester(alpha=0.05, random_seed=self.random_seed)
-        
-        # Create state history DataFrame
         state_history = self._seir_results.copy()
-        
-        # Merge infection times for H4 test if available
         infection_times_df = getattr(self, '_infection_times_df', pd.DataFrame())
         if not infection_times_df.empty:
             self.logger.info(f"Including {len(infection_times_df)} node infection times for H4 test")
-        
-        # Determine if real FGI data is available
-        fgi_is_unusable = (
-            self._fgi_values is None or self._fgi_is_synthetic
-        )
 
-        # Prepare FGI array — still needed for non-H3 tests
+        fgi_is_unusable = (self._fgi_values is None or self._fgi_is_synthetic)
         fgi_array = np.asarray(self._fgi_values) if self._fgi_values is not None else np.array([50.0])
 
         if hypothesis == 'all':
-            self.logger.info("Testing all hypotheses...")
-            self._hypothesis_results = tester.test_all(
-                self._graph,
-                state_history,
-                fgi_array,
-                self._estimated_params,
-                observed_data=self._seir_results,
-                infection_times_df=infection_times_df
-            )
-            # Override H3 if FGI data is not real
-            if fgi_is_unusable:
-                self.logger.error(
-                    "Skipping H3: No real FGI data available. H3 requires actual "
-                    "Fear & Greed Index data to test sentiment-transmission correlation."
-                )
-                self._hypothesis_results['H3'] = tester._inconclusive_result(
-                    "H3",
-                    "No real FGI data available (using synthetic/fallback values)"
-                )
+            # Check for full cached result first
+            if cp.has('hypothesis_results'):
+                self._hypothesis_results = cp.load('hypothesis_results')
+                self.logger.info("Loaded all hypothesis results from checkpoint")
+            else:
+                self.logger.info("Testing all hypotheses...")
+                try:
+                    self._hypothesis_results = tester.test_all(
+                        self._graph,
+                        state_history,
+                        fgi_array,
+                        self._estimated_params,
+                        observed_data=self._seir_results,
+                        infection_times_df=infection_times_df
+                    )
+                    # Override H3 if FGI data is not real
+                    if fgi_is_unusable:
+                        self.logger.error(
+                            "Skipping H3: No real FGI data available. H3 requires actual "
+                            "Fear & Greed Index data to test sentiment-transmission correlation."
+                        )
+                        self._hypothesis_results['H3'] = tester._inconclusive_result(
+                            "H3",
+                            "No real FGI data available (using synthetic/fallback values)"
+                        )
+                    cp.save('hypothesis_results', self._hypothesis_results)
+                except Exception as e:
+                    self.logger.error(f"Hypothesis testing failed: {e}")
+                    self.logger.info("Estimation checkpoints preserved")
+                    raise
         else:
             self._hypothesis_results = {}
             self.logger.info(f"Testing hypothesis {hypothesis}...")
@@ -1241,35 +1298,83 @@ class CryptoCascadesPipeline:
         period_results = {}
         r0_bull_markets = []
         r0_bear_market = None
-        
+
         # Initialize components
         tester = HypothesisTester(alpha=0.05, random_seed=self.random_seed)
         viz = SEIRVisualizer(output_dir=str(self.output_dir / 'figures'))
-        
+
+        # Load previously completed periods from disk
+        period_results_file = self.output_dir / 'data' / 'period_results.pkl'
+        if period_results_file.exists():
+            import pickle
+            try:
+                with open(period_results_file, 'rb') as f:
+                    period_results = pickle.load(f)
+                self.logger.info(
+                    f"Loaded {len(period_results)} previously completed periods"
+                )
+                # Rebuild R0 lists from saved results
+                for name, res in period_results.items():
+                    if res.get('market_type') == 'bull':
+                        r0_bull_markets.append(res['r0'])
+                    elif res.get('market_type') == 'bear':
+                        r0_bear_market = res['r0']
+            except Exception as e:
+                self.logger.warning(f"Could not load period results: {e}")
+                period_results = {}
+
         for period_name, period_config in time_windows.items():
+            # Skip already-completed periods
+            if period_name in period_results:
+                self.logger.info(f"Skipping already-completed period: {period_name}")
+                continue
+
             self.logger.info("-" * 40)
             self.logger.info(f"Analyzing period: {period_name.upper()}")
             self.logger.info(f"  Type: {period_config.get('type', 'unknown')}")
             self.logger.info(f"  Start: {period_config.get('start')}")
             self.logger.info(f"  End: {period_config.get('end')}")
             self.logger.info("-" * 40)
-            
-            # Run full pipeline for this period
-            self.run_preprocess(
-                start_date=period_config.get('start'),
-                end_date=period_config.get('end')
+
+            # Clear per-phase checkpoints so each period gets fresh computation
+            from src.utils.checkpoint import CheckpointManager
+            cp = CheckpointManager(
+                self.output_dir / 'checkpoints',
+                Path('configs/config.yaml'),
             )
-            self.run_analyze()
-            self.run_simulate(n_simulations=50)
-            self.run_estimate()
-            
-            # Store R₀ results
+            cp.invalidate()
+
+            # Reset in-memory state for this period
+            self._graph = None
+            self._transactions = None
+            self._node_states = None
+            self._seir_results = None
+            self._estimated_params = None
+            self._hypothesis_results = None
+
+            # Run full pipeline for this period
+            try:
+                self.run_preprocess(
+                    start_date=period_config.get('start'),
+                    end_date=period_config.get('end')
+                )
+                self.run_analyze()
+                self.run_simulate(n_simulations=50)
+                self.run_estimate()
+            except Exception as e:
+                self.logger.error(f"Period {period_name} failed: {e}")
+                self.logger.info("Previously completed periods are preserved")
+                continue
+
             if self._estimated_params is None or self._seir_results is None:
                 self.logger.warning(f"Skipping period {period_name} due to missing results")
                 continue
 
             # Run per-period hypothesis tests
-            self.run_test()
+            try:
+                self.run_test()
+            except Exception as e:
+                self.logger.warning(f"Hypothesis testing failed for {period_name}: {e}")
 
             r0_value = self._estimated_params.r0()
             r0_ci = getattr(self._estimated_params, 'r0_ci', (r0_value * 0.9, r0_value * 1.1))
@@ -1284,14 +1389,20 @@ class CryptoCascadesPipeline:
                 'hypothesis_results': self._hypothesis_results,
                 'fgi_data_source': 'synthetic' if self._fgi_is_synthetic else 'real',
             }
-            
+
             # Categorize by market type
             if period_config.get('type') == 'bull':
                 r0_bull_markets.append(r0_value)
             elif period_config.get('type') == 'bear':
                 r0_bear_market = r0_value
-            
+
             self.logger.info(f"  R₀ = {r0_value:.3f} [{r0_ci[0]:.3f}, {r0_ci[1]:.3f}]")
+
+            # Save period results after each period completes
+            import pickle
+            with open(period_results_file, 'wb') as f:
+                pickle.dump(period_results, f)
+            self.logger.info(f"Saved period results checkpoint ({len(period_results)} periods)")
         
         # Run H6 test: Market condition comparison
         self.logger.info("=" * 60)
