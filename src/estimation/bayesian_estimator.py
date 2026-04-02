@@ -202,9 +202,14 @@ class BayesianEstimator:
         # initialisation failures (mean = 2/0.1 = 20).
         concentration = numpyro.sample("concentration", dist.Gamma(2, 0.1))
 
-        # Dirichlet likelihood for each time step
+        # Dirichlet likelihood for each time step.
+        # Floor predicted fractions at a small positive value so the
+        # Dirichlet alpha never approaches zero (which produces -inf
+        # log-prob and blocks NUTS initialisation).
         for t in range(T):
-            alpha_t = predicted[t] * concentration + 1e-6
+            pred_t = jnp.clip(predicted[t], 1e-4, 1.0)
+            pred_t = pred_t / jnp.sum(pred_t)  # re-normalise after clip
+            alpha_t = pred_t * concentration + 1e-4
             numpyro.sample(f"obs_{t}", dist.Dirichlet(alpha_t), obs=obs_matrix[t])
 
     # ------------------------------------------------------------------
@@ -232,9 +237,13 @@ class BayesianEstimator:
             credible intervals, and the raw posterior samples attached
             as ``result.posterior_samples``.
         """
-        # Build observation matrix (T x 4) as a JAX array
+        # Build observation matrix (T x 4) as a JAX array.
+        # Floor at a small positive value and re-normalise so rows sum
+        # to 1 — Dirichlet log_prob is -inf for exact-zero observations.
         frac_cols = ["S_frac", "E_frac", "I_frac", "R_frac"]
-        obs_matrix = jnp.array(obs_fracs[frac_cols].values, dtype=jnp.float32)
+        obs_raw = jnp.array(obs_fracs[frac_cols].values, dtype=jnp.float32)
+        obs_floored = jnp.clip(obs_raw, 1e-4, 1.0)
+        obs_matrix = obs_floored / obs_floored.sum(axis=1, keepdims=True)
 
         logger.info(
             "Starting MCMC: %d warmup + %d samples, %d chain(s), "
@@ -246,7 +255,21 @@ class BayesianEstimator:
             N,
         )
 
-        kernel = NUTS(self._model)
+        # Use init_to_value with sensible defaults so NUTS doesn't
+        # have to search blindly for a valid starting point.  The
+        # Euler forward solver can produce NaN for extreme parameter
+        # values, causing init_to_median / init_to_uniform to fail.
+        init_values = {
+            "beta": jnp.array(0.25),
+            "sigma": jnp.array(0.15),
+            "gamma": jnp.array(0.08),
+            "omega": jnp.array(0.01),
+            "concentration": jnp.array(10.0),
+        }
+        kernel = NUTS(
+            self._model,
+            init_strategy=numpyro.infer.init_to_value(values=init_values),
+        )
         mcmc = MCMC(
             kernel,
             num_warmup=self.num_warmup,
