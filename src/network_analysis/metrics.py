@@ -337,8 +337,8 @@ class NetworkMetrics:
         Compute clustering coefficients.
 
         Uses the best available backend for performance:
-          1. **NetworKit** (parallel C++, fastest) — if installed
-          2. **igraph** (single-threaded C) — if installed
+          1. **igraph** (C backend, fastest for this workload) — if installed
+          2. **NetworKit** (parallel C++) — fallback
           3. **NetworkX** (pure Python, with sampling) — last resort
 
         Args:
@@ -356,19 +356,7 @@ class NetworkMetrics:
         n_nodes = G.number_of_nodes()
         results = {}
 
-        # ── Tier 1: NetworKit (parallel C++, fastest) ──
-        if HAS_NETWORKIT and n_nodes > self.large_graph_nodes:
-            self.logger.info(
-                f"Using NetworKit (parallel C++) for {n_nodes:,} node graph"
-            )
-            try:
-                return self._compute_clustering_networkit(G)
-            except Exception as e:
-                self.logger.warning(
-                    f"NetworKit clustering failed: {e}. Trying igraph..."
-                )
-
-        # ── Tier 2: igraph (single-threaded C) ──
+        # ── Tier 1: igraph (C backend, fastest for this workload) ──
         if HAS_IGRAPH and n_nodes > self.large_graph_nodes:
             self.logger.info(
                 f"Using igraph (C backend) for {n_nodes:,} node graph"
@@ -377,7 +365,19 @@ class NetworkMetrics:
                 return self._compute_clustering_igraph(G)
             except Exception as e:
                 self.logger.warning(
-                    f"igraph clustering failed, falling back to NetworkX: {e}"
+                    f"igraph clustering failed: {e}. Trying NetworKit..."
+                )
+
+        # ── Tier 2: NetworKit (parallel C++) ──
+        if HAS_NETWORKIT and n_nodes > self.large_graph_nodes:
+            self.logger.info(
+                f"Using NetworKit (parallel C++) for {n_nodes:,} node graph"
+            )
+            try:
+                return self._compute_clustering_networkit(G)
+            except Exception as e:
+                self.logger.warning(
+                    f"NetworKit clustering failed, falling back to NetworkX: {e}"
                 )
 
         # ── Tier 3: NetworkX (pure Python, fine for small graphs) ──
