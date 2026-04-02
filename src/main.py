@@ -366,10 +366,12 @@ class CryptoCascadesPipeline:
                     f"Written {total_edges:,} edges to {output_file}"
                 )
 
-                # Load the combined parquet for downstream use
-                self._transactions = pd.read_parquet(output_file)
+                # Don't reload the full parquet here — it may exceed
+                # available RAM (858M rows ≈ 8-10 GB).  The analyze
+                # phase loads it on demand from the saved file.
                 self.logger.info(
-                    f"Loaded {len(self._transactions):,} transactions"
+                    f"Preprocessing complete. {total_edges:,} transactions "
+                    f"saved to {output_file}"
                 )
             else:
                 self.logger.warning("No parquet files matched date range. Using sample data.")
@@ -496,24 +498,67 @@ class CryptoCascadesPipeline:
                 f"Loaded graph: {self._graph.number_of_nodes():,} nodes, "
                 f"{self._graph.number_of_edges():,} edges"
             )
-            # Also need transactions for state assignment
-            processed_file = self.output_dir / 'data' / 'processed_transactions.parquet'
-            if self._transactions is None and processed_file.exists():
-                self._transactions = pd.read_parquet(processed_file)
+            # Transactions are loaded lazily for state assignment —
+            # only the columns needed, not the full 858M-row frame.
+            # State assignment reads directly from parquet below.
         else:
             if self._graph is None:
                 processed_file = self.output_dir / 'data' / 'processed_transactions.parquet'
                 if processed_file.exists():
                     self.logger.info(f"Loading preprocessed data from {processed_file}")
-                    df = pd.read_parquet(processed_file)
-                    self.logger.info(f"Loaded {len(df):,} transactions")
+                    # Stream parquet in chunks to aggregate edges without
+                    # loading all 858M rows at once (~8-10 GB).
+                    import pyarrow.parquet as pq
+                    pf = pq.ParquetFile(str(processed_file))
+                    total_rows = pf.metadata.num_rows
+                    self.logger.info(f"Parquet has {total_rows:,} rows in {pf.metadata.num_row_groups} row groups")
+
+                    # Accumulate edge aggregates chunk by chunk
+                    agg_frames = []
+                    for i in range(pf.metadata.num_row_groups):
+                        chunk = pf.read_row_group(i).to_pandas()
+                        # Aggregate within chunk
+                        grouped = chunk.groupby(['source_id', 'target_id']).agg(
+                            btc_value=('btc_value', 'sum'),
+                            usd_value=('usd_value', 'sum'),
+                            count=('btc_value', 'count'),
+                        ).reset_index()
+                        agg_frames.append(grouped)
+                        del chunk
+                        gc.collect()
+                        self.logger.info(f"  Aggregated row group {i+1}/{pf.metadata.num_row_groups}")
+
+                    # Final aggregation across chunks
+                    self.logger.info("Merging aggregated chunks...")
+                    all_agg = pd.concat(agg_frames, ignore_index=True)
+                    del agg_frames
+                    gc.collect()
+
+                    final_agg = all_agg.groupby(['source_id', 'target_id']).agg(
+                        btc_value=('btc_value', 'sum'),
+                        usd_value=('usd_value', 'sum'),
+                        count=('count', 'sum'),
+                    ).reset_index()
+                    del all_agg
+                    gc.collect()
+
+                    self.logger.info(f"Aggregated to {len(final_agg):,} unique edges")
+
+                    # Build graph from pre-aggregated edges
                     builder = GraphBuilder()
-                    self._graph = builder.build_transaction_graph(df)
+                    self._graph = builder.build_transaction_graph(
+                        final_agg,
+                        directed=False,
+                        weight_column='usd_value',
+                        aggregate_multi_edges=False,  # already aggregated
+                    )
+                    del final_agg
+                    gc.collect()
+
                     self.logger.info(
                         f"Built graph: {self._graph.number_of_nodes():,} nodes, "
                         f"{self._graph.number_of_edges():,} edges"
                     )
-                    self._transactions = df
                 else:
                     self.run_preprocess()
 
@@ -600,6 +645,21 @@ class CryptoCascadesPipeline:
                 spontaneous_infection_rate=self.config.get('state_assignment.infected.spontaneous_rate', 0.001),
                 random_seed=self.random_seed,
             )
+
+            # Load transactions for state assignment if not already in
+            # memory.  Only load the columns needed for wallet flows to
+            # limit memory (~3-4 GB instead of ~8-10 GB).
+            if self._transactions is None:
+                processed_file = self.output_dir / 'data' / 'processed_transactions.parquet'
+                if processed_file.exists():
+                    flow_cols = ['source_id', 'target_id', 'usd_value', 'btc_value', 'datetime', 'timestamp']
+                    available = pd.read_parquet(processed_file, columns=['source_id']).columns  # peek
+                    import pyarrow.parquet as pq
+                    schema_names = pq.read_schema(str(processed_file)).names
+                    use_cols = [c for c in flow_cols if c in schema_names]
+                    self.logger.info(f"Loading transactions for state assignment (columns: {use_cols})...")
+                    self._transactions = pd.read_parquet(processed_file, columns=use_cols)
+                    self.logger.info(f"Loaded {len(self._transactions):,} rows for state assignment")
 
             if self._transactions is None:
                 self.logger.error(
