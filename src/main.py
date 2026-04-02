@@ -219,14 +219,17 @@ class CryptoCascadesPipeline:
         )
         orbitaal.download_samples()
 
-        # Download the full archive (daily snapshots recommended)
+        # Download and extract the full archive (daily snapshots recommended)
         archive_type = self.config.get('data.orbitaal.archive_type', 'daily')
         self.logger.info(f"Downloading ORBITAAL {archive_type} archive...")
         try:
-            orbitaal.download_archive(archive_type)
+            downloaded = orbitaal.download_archive(archive_type)
+            if downloaded:
+                self.logger.info(f"Extracting {archive_type} archive...")
+                orbitaal.extract_archive(archive_type)
         except Exception as e:
             self.logger.warning(
-                f"Could not download {archive_type} archive: {e}. "
+                f"Could not download/extract {archive_type} archive: {e}. "
                 f"Pipeline will use sample data or existing files."
             )
         

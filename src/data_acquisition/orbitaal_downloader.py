@@ -212,9 +212,10 @@ class OrbitaalDownloader:
         if not archive_path.exists():
             self.logger.error(f"Archive not found: {archive_path}")
             return False
-            
-        extract_dir = self.data_dir / archive_type
-        extract_dir.mkdir(exist_ok=True)
+
+        # Extract into data_dir so the SNAPSHOT/EDGES/day/ structure
+        # appears directly under the ORBITAAL data directory.
+        extract_dir = self.data_dir
         
         self.logger.info(f"Extracting {filename}...")
         
