@@ -285,44 +285,92 @@ class CryptoCascadesPipeline:
         
         if parquet_files:
             self.logger.info(f"Found {len(parquet_files)} parquet files in {parquet_dir}")
-            
-            # Filter parquet files by date range (filename contains date like 2017-10)
-            dfs = []
-            for pq_file in parquet_files:
-                # Extract date from filename: orbitaal-snapshot-date-2017-10-file-id-106.snappy.parquet
+
+            # Filter files by date range from filename, then load in
+            # memory-efficient chunks.  Writing each batch to a single
+            # output parquet avoids holding 40+ GB in RAM.
+            output_file = self.output_dir / 'data' / 'processed_transactions.parquet'
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+
+            matched_files = []
+            for pq_file in sorted(parquet_files):
                 filename = pq_file.name
                 try:
-                    # Parse date from filename.
-                    # Daily:   orbitaal-snapshot-date-2017-10-15-file-id-106.snappy.parquet
-                    # Monthly: orbitaal-snapshot-date-2017-10-file-id-106.snappy.parquet
                     parts = filename.split('-')
                     year_idx = parts.index('date') + 1
                     year = int(parts[year_idx])
                     month = int(parts[year_idx + 1])
-                    # Daily files have a third date component before 'file'
                     day_part = parts[year_idx + 2] if len(parts) > year_idx + 2 else ''
                     day = int(day_part) if day_part.isdigit() else 15
                     file_date = f"{year}-{month:02d}-{day:02d}"
-
-                    # Check if file's date is within requested range
-                    if file_date >= start and file_date <= end:
-                        self.logger.info(f"Loading {filename} ({file_date})...")
-                        df = pd.read_parquet(pq_file)
-                        df = parser._standardize_columns(df)
-                        # Assign datetime from filename for snapshot files
-                        if 'datetime' not in df.columns and 'timestamp' not in df.columns:
-                            df['datetime'] = pd.Timestamp(file_date)
-                        elif 'timestamp' in df.columns and 'datetime' not in df.columns:
-                            df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
-                        if not df.empty:
-                            dfs.append(df)
-                            self.logger.info(f"  Loaded {len(df):,} edges")
+                    if start <= file_date <= end:
+                        matched_files.append((pq_file, file_date))
                 except (ValueError, IndexError) as e:
                     self.logger.warning(f"Could not parse date from {filename}: {e}")
                     continue
-            
-            if dfs:
-                self._transactions = pd.concat(dfs, ignore_index=True)
+
+            self.logger.info(
+                f"{len(matched_files)} files match date range {start} to {end}"
+            )
+
+            if matched_files:
+                # Stream files in batches and write to parquet using
+                # PyArrow's ParquetWriter which appends row groups
+                # without re-reading the whole file.  Peak memory is
+                # limited to one batch (~30 files ≈ 2-3 GB).
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+
+                BATCH_SIZE = 30
+                total_edges = 0
+                writer = None
+                schema = None
+
+                try:
+                    for batch_start in range(0, len(matched_files), BATCH_SIZE):
+                        batch = matched_files[batch_start:batch_start + BATCH_SIZE]
+                        dfs = []
+                        for pq_file, file_date in batch:
+                            df = pd.read_parquet(pq_file)
+                            df = parser._standardize_columns(df)
+                            if 'datetime' not in df.columns and 'timestamp' not in df.columns:
+                                df['datetime'] = pd.Timestamp(file_date)
+                            elif 'timestamp' in df.columns and 'datetime' not in df.columns:
+                                df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
+                            if not df.empty:
+                                dfs.append(df)
+
+                        if dfs:
+                            chunk = pd.concat(dfs, ignore_index=True)
+                            total_edges += len(chunk)
+                            table = pa.Table.from_pandas(chunk, preserve_index=False)
+
+                            if writer is None:
+                                schema = table.schema
+                                writer = pq.ParquetWriter(
+                                    str(output_file), schema, compression='snappy'
+                                )
+                            writer.write_table(table)
+                            del dfs, chunk, table
+
+                        import gc; gc.collect()
+                        self.logger.info(
+                            f"  Processed {min(batch_start + BATCH_SIZE, len(matched_files))}"
+                            f"/{len(matched_files)} files ({total_edges:,} edges)"
+                        )
+                finally:
+                    if writer is not None:
+                        writer.close()
+
+                self.logger.info(
+                    f"Written {total_edges:,} edges to {output_file}"
+                )
+
+                # Load the combined parquet for downstream use
+                self._transactions = pd.read_parquet(output_file)
+                self.logger.info(
+                    f"Loaded {len(self._transactions):,} transactions"
+                )
             else:
                 self.logger.warning("No parquet files matched date range. Using sample data.")
                 self._transactions = self._create_sample_transactions()
