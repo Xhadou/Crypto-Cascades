@@ -462,6 +462,10 @@ class StateAssigner:
         """
         Run state assignment over all time periods.
 
+        Memory-optimised: pre-groups flows by date, pre-computes wallet
+        stats, and only processes active wallets + their neighbors each
+        day instead of all 30M wallets.
+
         Args:
             g: Transaction graph (igraph)
             flows: Wallet flow DataFrame with date column
@@ -473,44 +477,125 @@ class StateAssigner:
         """
         self.reset()
 
-        # Get unique dates
         dates = sorted(flows['date'].unique())
         self.logger.info(f"Running state assignment over {len(dates)} time periods...")
 
-        # Initialize states — wallet IDs are stored in vs['name']
-        all_wallets = list(g.vs['name'])
-        
+        all_wallets = set(g.vs['name'])
+        n2i = name_to_idx(g)
+        names = g.vs['name']
+
         if initial_infected is None:
-            # Select top buyers as initial infected
             total_buying = flows.groupby('wallet_id')['net_btc'].sum()
             n_initial = max(1, int(len(all_wallets) * initial_infected_fraction))
             top_buyers = total_buying.nlargest(n_initial)
             initial_infected = list(top_buyers.index)
-            
+
         self.logger.info(f"Initial infected: {len(initial_infected)} wallets")
-            
-        # Initialize all wallets as susceptible
-        current_states = {w: State.SUSCEPTIBLE for w in all_wallets}
-        
-        # Set initial infected
+
+        # Use defaultdict — only store non-SUSCEPTIBLE states.
+        # This keeps the dict small (only active wallets) instead of 30M entries.
+        current_states: Dict[int, State] = {}
+        n_susceptible = len(all_wallets)
+
         initial_time = datetime.combine(dates[0], datetime.min.time())
         for w in initial_infected:
-            if w in current_states:
+            if w in all_wallets:
                 current_states[w] = State.INFECTED
+                n_susceptible -= 1
                 self.infection_times[w] = initial_time
                 self.last_buying_activity[w] = initial_time
                 self.state_history[w].append((initial_time, State.INFECTED))
-                
-        # Track state counts
+
+        # Pre-group flows by date to avoid filtering 103M rows each iteration
+        self.logger.info("Pre-grouping flows by date...")
+        flows_by_date = {
+            date: group for date, group in flows.groupby('date')
+        }
+
+        # Pre-compute cumulative wallet stats for z-score classification
+        self.logger.info("Pre-computing wallet statistics...")
+        wallet_cum_stats = flows.groupby('wallet_id')['net_btc'].agg(
+            ['mean', 'std']
+        ).fillna(0)
+        wallet_mean_dict = wallet_cum_stats['mean'].to_dict()
+        wallet_std_dict = wallet_cum_stats['std'].to_dict()
+        del wallet_cum_stats
+
         state_counts = []
-        
+
         for date in tqdm(dates, desc="Assigning states"):
             current_time = datetime.combine(date, datetime.min.time())
-            
-            # Assign states
-            current_states = self.assign_states_at_time(
-                g, flows, current_time, current_states
+
+            # Get flows for this date and a rolling window
+            current_date = date
+            day_flows = flows_by_date.get(current_date, pd.DataFrame())
+
+            if day_flows.empty:
+                # No activity this day — just count states
+                n_e = sum(1 for s in current_states.values() if s == State.EXPOSED)
+                n_i = sum(1 for s in current_states.values() if s == State.INFECTED)
+                n_r = sum(1 for s in current_states.values() if s == State.RECOVERED)
+                state_counts.append({
+                    'date': date, 'datetime': current_time,
+                    'S': len(all_wallets) - n_e - n_i - n_r,
+                    'E': n_e, 'I': n_i, 'R': n_r,
+                    'total': len(all_wallets)
+                })
+                continue
+
+            # Aggregate net flow per wallet for this window
+            window_dates = [d for d in dates if d >= current_date - timedelta(days=self.susceptible_window.days) and d <= current_date]
+            window_flows = pd.concat(
+                [flows_by_date[d] for d in window_dates if d in flows_by_date],
+                ignore_index=True
             )
+            wallet_net_flow = window_flows.groupby('wallet_id')['net_btc'].sum().to_dict()
+            del window_flows
+
+            # Only process wallets that are active today + infected + their neighbors
+            infected_wallets = {w for w, s in current_states.items() if s == State.INFECTED}
+            active_wallets = set(day_flows['wallet_id'].unique()) if not day_flows.empty else set()
+
+            # Add neighbors of infected wallets (they might become exposed)
+            wallets_to_process = active_wallets.copy()
+            for w in infected_wallets:
+                if w in n2i:
+                    for ni in g.neighbors(n2i[w]):
+                        wallets_to_process.add(names[ni])
+
+            # Also process wallets in non-susceptible states (they might transition)
+            wallets_to_process.update(current_states.keys())
+
+            new_states = {}
+            for wallet in wallets_to_process:
+                if wallet not in all_wallets:
+                    continue
+                prev_state = current_states.get(wallet, State.SUSCEPTIBLE)
+                net_flow = wallet_net_flow.get(wallet, 0)
+                wallet_mean = wallet_mean_dict.get(wallet, 0.0)
+                wallet_std = wallet_std_dict.get(wallet, 0.0)
+                is_buying = self._is_buying_zscore(net_flow, wallet_mean, wallet_std)
+
+                new_state = self._compute_new_state(
+                    wallet, prev_state, is_buying, g,
+                    infected_wallets, current_time,
+                    n2i=n2i, names=names
+                )
+
+                if new_state != State.SUSCEPTIBLE:
+                    new_states[wallet] = new_state
+                elif wallet in current_states:
+                    # Wallet returned to susceptible — remove from active dict
+                    pass
+
+                if wallet not in self.state_history or \
+                   (self.state_history[wallet] and self.state_history[wallet][-1][1] != new_state):
+                    self.state_history[wallet].append((current_time, new_state))
+
+            # Update current_states: remove wallets that returned to S,
+            # add/update wallets that changed
+            current_states = {w: s for w, s in current_states.items() if w in wallets_to_process}
+            current_states.update(new_states)
             
             # Count states
             counts = {s: 0 for s in State}
