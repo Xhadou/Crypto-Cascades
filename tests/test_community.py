@@ -7,9 +7,10 @@ Tests the community detection module including:
 - Result format consistency across algorithms
 """
 
+import random
 import pytest
 import numpy as np
-import networkx as nx
+import igraph as ig
 from unittest.mock import patch
 
 from src.network_analysis.community_detection import CommunityDetector
@@ -24,24 +25,53 @@ def detector():
 @pytest.fixture
 def barabasi_graph():
     """Create a Barabasi-Albert graph with clear community structure."""
-    return nx.barabasi_albert_graph(200, 3, seed=42)
+    rng = random.Random(42)
+    ig.set_random_number_generator(rng)
+    g = ig.Graph.Barabasi(200, 3)
+    # Assign string node names to match project convention
+    g.vs['name'] = [str(i) for i in range(g.vcount())]
+    g['_name_to_idx'] = {name: i for i, name in enumerate(g.vs['name'])}
+    return g
 
 
 @pytest.fixture
 def directed_graph():
     """Create a directed graph for testing directed-to-undirected conversion."""
-    G = nx.barabasi_albert_graph(100, 3, seed=42)
-    return G.to_directed()
+    rng = random.Random(42)
+    ig.set_random_number_generator(rng)
+    g = ig.Graph.Barabasi(100, 3)
+    # Convert to directed (each undirected edge becomes two directed edges)
+    g = g.as_directed()
+    g.vs['name'] = [str(i) for i in range(g.vcount())]
+    g['_name_to_idx'] = {name: i for i, name in enumerate(g.vs['name'])}
+    return g
 
 
 @pytest.fixture
 def planted_partition_graph():
-    """Create a graph with known planted community structure."""
-    # 4 communities of 50 nodes each; p_in >> p_out ensures clear partition
-    sizes = [50, 50, 50, 50]
+    """Create a graph with known planted community structure.
+
+    4 communities of 50 nodes each; p_in >> p_out ensures clear partition.
+    """
+    rng = random.Random(42)
+    n_per_group = 50
+    n_groups = 4
+    n = n_per_group * n_groups
     p_in = 0.3
     p_out = 0.01
-    return nx.planted_partition_graph(len(sizes), sizes[0], p_in, p_out, seed=42)
+
+    edges = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            same_group = (i // n_per_group) == (j // n_per_group)
+            p = p_in if same_group else p_out
+            if rng.random() < p:
+                edges.append((i, j))
+
+    g = ig.Graph(n=n, edges=edges, directed=False)
+    g.vs['name'] = [str(i) for i in range(n)]
+    g['_name_to_idx'] = {str(i): i for i in range(n)}
+    return g
 
 
 class TestLeidenCommunity:
@@ -63,7 +93,7 @@ class TestLeidenCommunity:
     def test_leiden_partition_covers_all_nodes(self, detector, barabasi_graph):
         """Every node in the graph should appear in the partition."""
         result = detector.detect_communities_leiden(barabasi_graph)
-        assert set(result['partition'].keys()) == set(barabasi_graph.nodes())
+        assert set(result['partition'].keys()) == set(barabasi_graph.vs['name'])
 
     def test_leiden_modularity_is_positive(self, detector, barabasi_graph):
         """Modularity should be positive for a graph with community structure."""
@@ -74,7 +104,7 @@ class TestLeidenCommunity:
         """Sum of community sizes should equal total number of nodes."""
         result = detector.detect_communities_leiden(barabasi_graph)
         total = sum(result['community_sizes'].values())
-        assert total == barabasi_graph.number_of_nodes()
+        assert total == barabasi_graph.vcount()
 
     def test_leiden_handles_directed_graph(self, detector, directed_graph):
         """Leiden should handle directed graphs by converting to undirected."""
@@ -136,7 +166,7 @@ class TestLeidenFallback:
         ):
             result = detector.detect_communities_leiden(barabasi_graph)
             assert set(result['partition'].keys()) == set(
-                barabasi_graph.nodes()
+                barabasi_graph.vs['name']
             )
 
 

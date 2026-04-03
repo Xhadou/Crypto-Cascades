@@ -10,12 +10,21 @@ Tests SEIR state assignment logic including:
 import pytest
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 from datetime import datetime, timedelta
 
 from src.state_engine.state_assigner import (
     StateAssigner, State, validate_transition, VALID_TRANSITIONS
 )
+
+
+def _make_graph(n: int, edges: list[tuple[int, int]] | None = None) -> ig.Graph:
+    """Create a small igraph test graph with identity name mapping."""
+    edges = edges or []
+    g = ig.Graph(n=n, edges=edges)
+    g.vs['name'] = list(range(n))
+    g['_name_to_idx'] = {i: i for i in range(n)}
+    return g
 
 
 class TestValidTransitions:
@@ -144,9 +153,7 @@ class TestStateTransitions:
     @pytest.fixture
     def simple_graph(self):
         """Create a simple test graph."""
-        G = nx.Graph()
-        G.add_edges_from([(0, 1), (1, 2), (2, 3), (3, 4)])
-        return G
+        return _make_graph(5, [(0, 1), (1, 2), (2, 3), (3, 4)])
 
     @pytest.fixture
     def assigner(self):
@@ -166,7 +173,7 @@ class TestStateTransitions:
             wallet=0,
             prev_state=State.SUSCEPTIBLE,
             is_buying=False,
-            G=simple_graph,
+            g=simple_graph,
             infected_wallets=infected_wallets,
             current_time=datetime.now()
         )
@@ -181,7 +188,7 @@ class TestStateTransitions:
             wallet=0,
             prev_state=State.SUSCEPTIBLE,
             is_buying=False,
-            G=simple_graph,
+            g=simple_graph,
             infected_wallets=infected_wallets,
             current_time=datetime.now()
         )
@@ -196,7 +203,7 @@ class TestStateTransitions:
             wallet=0,
             prev_state=State.SUSCEPTIBLE,
             is_buying=True,
-            G=simple_graph,
+            g=simple_graph,
             infected_wallets=infected_wallets,
             current_time=datetime.now()
         )
@@ -209,7 +216,7 @@ class TestStateTransitions:
             wallet=0,
             prev_state=State.EXPOSED,
             is_buying=False,
-            G=simple_graph,
+            g=simple_graph,
             infected_wallets=set(),
             current_time=datetime.now()
         )
@@ -222,7 +229,7 @@ class TestStateTransitions:
             wallet=0,
             prev_state=State.EXPOSED,
             is_buying=True,
-            G=simple_graph,
+            g=simple_graph,
             infected_wallets=set(),
             current_time=datetime.now()
         )
@@ -237,8 +244,7 @@ class TestImmunityWaning:
         """R stays R before immunity_waning_window passes."""
         assigner = StateAssigner(immunity_waning_days=30)
 
-        G = nx.Graph()
-        G.add_node(0)
+        g = _make_graph(1)
 
         # Set recovery time to 10 days ago
         recovery_time = datetime.now() - timedelta(days=10)
@@ -248,7 +254,7 @@ class TestImmunityWaning:
             wallet=0,
             prev_state=State.RECOVERED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=datetime.now()
         )
@@ -259,8 +265,7 @@ class TestImmunityWaning:
         """R becomes S after immunity_waning_window passes."""
         assigner = StateAssigner(immunity_waning_days=30)
 
-        G = nx.Graph()
-        G.add_node(0)
+        g = _make_graph(1)
 
         # Set recovery time to 35 days ago
         recovery_time = datetime.now() - timedelta(days=35)
@@ -270,7 +275,7 @@ class TestImmunityWaning:
             wallet=0,
             prev_state=State.RECOVERED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=datetime.now()
         )
@@ -281,8 +286,7 @@ class TestImmunityWaning:
         """R stays R exactly at immunity_waning_window boundary."""
         assigner = StateAssigner(immunity_waning_days=30)
 
-        G = nx.Graph()
-        G.add_node(0)
+        g = _make_graph(1)
 
         # Use a fixed reference time to avoid timing drift between setup and call
         now = datetime.now()
@@ -293,7 +297,7 @@ class TestImmunityWaning:
             wallet=0,
             prev_state=State.RECOVERED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=now
         )
@@ -309,14 +313,13 @@ class TestRecovery:
         """I stays I if still buying."""
         assigner = StateAssigner(recovery_window_days=3)
 
-        G = nx.Graph()
-        G.add_node(0)
+        g = _make_graph(1)
 
         new_state = assigner._compute_new_state(
             wallet=0,
             prev_state=State.INFECTED,
             is_buying=True,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=datetime.now()
         )
@@ -327,8 +330,7 @@ class TestRecovery:
         """I stays I during recovery window after stopping buying."""
         assigner = StateAssigner(recovery_window_days=3)
 
-        G = nx.Graph()
-        G.add_node(0)
+        g = _make_graph(1)
 
         # Last buying was 2 days ago (within recovery window)
         assigner.last_buying_activity[0] = datetime.now() - timedelta(days=2)
@@ -337,7 +339,7 @@ class TestRecovery:
             wallet=0,
             prev_state=State.INFECTED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=datetime.now()
         )
@@ -348,8 +350,7 @@ class TestRecovery:
         """I becomes R after recovery_window without buying."""
         assigner = StateAssigner(recovery_window_days=3)
 
-        G = nx.Graph()
-        G.add_node(0)
+        g = _make_graph(1)
 
         # Last buying was 5 days ago (past recovery window)
         assigner.last_buying_activity[0] = datetime.now() - timedelta(days=5)
@@ -358,7 +359,7 @@ class TestRecovery:
             wallet=0,
             prev_state=State.INFECTED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=datetime.now()
         )
@@ -473,14 +474,13 @@ class TestExposureTimeout:
         sa.exposure_start_times[1] = datetime(2017, 10, 1)
         current_time = datetime(2017, 10, 20)  # 19 days later > 14
 
-        G = nx.Graph()
-        G.add_node(1)
+        g = _make_graph(2)  # nodes 0, 1
 
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.EXPOSED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=current_time,
         )
@@ -492,14 +492,13 @@ class TestExposureTimeout:
         sa.exposure_start_times[1] = datetime(2017, 10, 1)
         current_time = datetime(2017, 10, 10)  # 9 days later < 14
 
-        G = nx.Graph()
-        G.add_node(1)
+        g = _make_graph(2)
 
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.EXPOSED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=current_time,
         )
@@ -511,14 +510,13 @@ class TestExposureTimeout:
         sa.exposure_start_times[1] = datetime(2017, 10, 1)
         current_time = datetime(2017, 10, 20)  # 19 days > 14
 
-        G = nx.Graph()
-        G.add_node(1)
+        g = _make_graph(2)
 
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.EXPOSED,
             is_buying=True,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=current_time,
         )
@@ -530,14 +528,13 @@ class TestExposureTimeout:
         sa.exposure_start_times[1] = datetime(2017, 10, 1)
         current_time = datetime(2017, 10, 15)  # exactly 14 days
 
-        G = nx.Graph()
-        G.add_node(1)
+        g = _make_graph(2)
 
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.EXPOSED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=current_time,
         )
@@ -548,14 +545,13 @@ class TestExposureTimeout:
         sa = StateAssigner(exposure_timeout_days=14)
         # No entry in exposure_start_times
 
-        G = nx.Graph()
-        G.add_node(1)
+        g = _make_graph(2)
 
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.EXPOSED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=datetime(2017, 10, 20),
         )
@@ -567,14 +563,13 @@ class TestExposureTimeout:
         sa.exposure_start_times[1] = datetime(2017, 10, 1)
         current_time = datetime(2017, 10, 20)  # 19 days > 14
 
-        G = nx.Graph()
-        G.add_node(1)
+        g = _make_graph(2)
 
         sa._compute_new_state(
             wallet=1,
             prev_state=State.EXPOSED,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=current_time,
         )
@@ -588,14 +583,13 @@ class TestSpontaneousInfection:
         """S wallet should have epsilon chance of spontaneous I transition."""
         sa = StateAssigner(spontaneous_infection_rate=1.0)  # 100% for test
 
-        G = nx.Graph()
-        G.add_node(1)
+        g = _make_graph(2)  # nodes 0, 1
 
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.SUSCEPTIBLE,
             is_buying=True,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=datetime(2017, 10, 1),
         )
@@ -605,14 +599,13 @@ class TestSpontaneousInfection:
         """S wallet with rate=0 should never spontaneously infect."""
         sa = StateAssigner(spontaneous_infection_rate=0.0)
 
-        G = nx.Graph()
-        G.add_node(1)
+        g = _make_graph(2)
 
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.SUSCEPTIBLE,
             is_buying=True,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=datetime(2017, 10, 1),
         )
@@ -623,14 +616,13 @@ class TestSpontaneousInfection:
         """S wallet not buying should NOT spontaneously infect even with rate=1."""
         sa = StateAssigner(spontaneous_infection_rate=1.0)
 
-        G = nx.Graph()
-        G.add_node(1)
+        g = _make_graph(2)
 
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.SUSCEPTIBLE,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets=set(),
             current_time=datetime(2017, 10, 1),
         )
@@ -640,14 +632,13 @@ class TestSpontaneousInfection:
         """S wallet with infected neighbor uses normal path, not spontaneous."""
         sa = StateAssigner(spontaneous_infection_rate=0.0)
 
-        G = nx.Graph()
-        G.add_edges_from([(1, 2)])
+        g = _make_graph(3, [(1, 2)])
 
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.SUSCEPTIBLE,
             is_buying=True,
-            G=G,
+            g=g,
             infected_wallets={2},
             current_time=datetime(2017, 10, 1),
         )
@@ -671,15 +662,14 @@ class TestExposureStartTracking:
     def test_s_to_e_records_exposure_start(self):
         """S->E transition should record the exposure start time."""
         sa = StateAssigner()
-        G = nx.Graph()
-        G.add_edges_from([(1, 2)])
+        g = _make_graph(3, [(1, 2)])
 
         current_time = datetime(2017, 10, 5)
         new_state = sa._compute_new_state(
             wallet=1,
             prev_state=State.SUSCEPTIBLE,
             is_buying=False,
-            G=G,
+            g=g,
             infected_wallets={2},
             current_time=current_time,
         )

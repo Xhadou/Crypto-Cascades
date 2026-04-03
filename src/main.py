@@ -22,13 +22,14 @@ from typing import Optional, Dict, List
 
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from src.utils.logger import get_logger, setup_logger
 from src.utils.config_manager import ConfigManager
+from src.utils.graph_adapter import build_igraph_from_edges, name_to_idx
 
 # Data acquisition
 from src.data_acquisition.orbitaal_downloader import OrbitaalDownloader
@@ -462,8 +463,8 @@ class CryptoCascadesPipeline:
         )
 
         self.logger.info(
-            f"Built graph: {self._graph.number_of_nodes():,} nodes, "
-            f"{self._graph.number_of_edges():,} edges"
+            f"Built graph: {self._graph.vcount():,} nodes, "
+            f"{self._graph.ecount():,} edges"
         )
 
         # Save processed data
@@ -495,8 +496,8 @@ class CryptoCascadesPipeline:
             self.logger.info("Loading graph from checkpoint...")
             self._graph = cp.load('graph')
             self.logger.info(
-                f"Loaded graph: {self._graph.number_of_nodes():,} nodes, "
-                f"{self._graph.number_of_edges():,} edges"
+                f"Loaded graph: {self._graph.vcount():,} nodes, "
+                f"{self._graph.ecount():,} edges"
             )
             # Transactions are loaded lazily for state assignment —
             # only the columns needed, not the full 858M-row frame.
@@ -561,23 +562,18 @@ class CryptoCascadesPipeline:
                         f"Building graph..."
                     )
 
-                    self._graph = nx.Graph()
-                    self._graph.add_edges_from(
-                        (src, tgt, {'weight': d[0], 'btc_value': d[1], 'count': d[2]})
-                        for (src, tgt), d in edge_data.items()
-                    )
+                    self._graph = build_igraph_from_edges(edge_data, directed=False)
                     del edge_data
                     gc.collect()
 
                     self.logger.info(
-                        f"Built graph: {self._graph.number_of_nodes():,} nodes, "
-                        f"{self._graph.number_of_edges():,} edges "
-                        f"(from {total_edges_added:,} aggregated edge records)"
+                        f"Built graph: {self._graph.vcount():,} nodes, "
+                        f"{self._graph.ecount():,} edges"
                     )
                 else:
                     self.run_preprocess()
 
-            if self._graph is None or self._graph.number_of_nodes() == 0:
+            if self._graph is None or self._graph.vcount() == 0:
                 self.logger.error(
                     "Graph is empty or unavailable. "
                     "Check that parquet files exist and match the date range."
@@ -585,8 +581,8 @@ class CryptoCascadesPipeline:
                 return
 
             cp.save('graph', self._graph, {
-                'nodes': self._graph.number_of_nodes(),
-                'edges': self._graph.number_of_edges(),
+                'nodes': self._graph.vcount(),
+                'edges': self._graph.ecount(),
             })
 
         # ── Step 2: Clustering coefficients (~30 min) ───────────────
@@ -605,9 +601,9 @@ class CryptoCascadesPipeline:
                 raise
 
         avg_clustering = clustering.get('avg_local_clustering') or 0.0
-        n_nodes = self._graph.number_of_nodes()
-        n_edges = self._graph.number_of_edges()
-        density = nx.density(self._graph)
+        n_nodes = self._graph.vcount()
+        n_edges = self._graph.ecount()
+        density = self._graph.density()
 
         basic_stats = {
             'n_nodes': n_nodes, 'n_edges': n_edges,
@@ -779,7 +775,7 @@ class CryptoCascadesPipeline:
         )
         model = NetworkSEIR(params, random_seed=self.random_seed)
 
-        N = self._graph.number_of_nodes()
+        N = self._graph.vcount()
         t_max = self.config.get('simulation.t_max', 100)
         fgi_array: Optional[np.ndarray] = None
         if self._fgi_values is not None:
@@ -823,17 +819,21 @@ class CryptoCascadesPipeline:
             else:
                 self.logger.info(f"Running {n_simulations} Monte Carlo simulations...")
                 if N > 5000:
+                    all_names = self._graph.vs['name']
                     nodes_sample = self.rng.choice(
-                        np.array(list(self._graph.nodes())), 5000, replace=False
+                        np.array(all_names), 5000, replace=False
                     )
-                    G_sample = self._graph.subgraph(nodes_sample)
+                    sample_set = set(nodes_sample)
+                    n2i = name_to_idx(self._graph)
+                    sample_indices = [n2i[n] for n in nodes_sample if n in n2i]
+                    G_sample = self._graph.induced_subgraph(sample_indices)
                 else:
                     G_sample = self._graph
 
                 try:
                     mc_results = model.run_monte_carlo(
                         G_sample,
-                        initial_infected_count=max(1, int(G_sample.number_of_nodes() * 0.01)),
+                        initial_infected_count=max(1, int(G_sample.vcount() * 0.01)),
                         t_max=min(t_max, 50),
                         n_simulations=min(n_simulations, 20),
                         fgi_values=np.asarray(self._fgi_values[:50]) if self._fgi_values is not None else None
@@ -886,7 +886,7 @@ class CryptoCascadesPipeline:
             self.logger.error("Graph or SEIR results not available")
             return
 
-        N = self._graph.number_of_nodes()
+        N = self._graph.vcount()
         fgi_array: Optional[np.ndarray] = None
         if self._fgi_values is not None:
             fgi_array = np.asarray(self._fgi_values)
@@ -1109,12 +1109,11 @@ class CryptoCascadesPipeline:
                 if topo and not np.isnan(topo.get('degree_ks_statistic', float('nan'))):
                     try:
                         snap_df = validator.load_snap_networks(str(snap_dir))
-                        snap_graph = nx.from_pandas_edgelist(
-                            snap_df, source='source', target='target',
-                            create_using=nx.DiGraph()
-                        )
-                        snap_degrees = np.array([d for _, d in snap_graph.degree()], dtype=float)
-                        orb_degrees = np.array([d for _, d in self._graph.degree()], dtype=float)
+                        from src.utils.graph_adapter import build_igraph_from_df
+                        snap_renamed = snap_df.rename(columns={'source': 'source_id', 'target': 'target_id'})
+                        snap_graph = build_igraph_from_df(snap_renamed, directed=True, aggregate=False)
+                        snap_degrees = np.array(snap_graph.degree(), dtype=float)
+                        orb_degrees = np.array(self._graph.degree(), dtype=float)
                         snap_viz = SEIRVisualizer(output_dir=str(self.output_dir / 'figures'))
                         fig = snap_viz.plot_topology_comparison(
                             snap_degrees, orb_degrees,
@@ -1244,11 +1243,12 @@ class CryptoCascadesPipeline:
                 G_plot = self._graph
                 states_plot = self._node_states
                 # Sample subgraph for large networks to avoid hanging
-                if G_plot.number_of_nodes() > 5000:
-                    sample_nodes = list(G_plot.nodes())[:5000]
-                    G_plot = G_plot.subgraph(sample_nodes)  # read-only view, no copy
-                    states_plot = {n: self._node_states.get(n, State.SUSCEPTIBLE) for n in G_plot.nodes()}
-                    self.logger.info(f"Sampled subgraph to {G_plot.number_of_nodes()} nodes for visualization")
+                if G_plot.vcount() > 5000:
+                    sample_indices = list(range(5000))
+                    G_plot = G_plot.induced_subgraph(sample_indices)
+                    plot_names = G_plot.vs['name']
+                    states_plot = {n: self._node_states.get(n, State.SUSCEPTIBLE) for n in plot_names}
+                    self.logger.info(f"Sampled subgraph to {G_plot.vcount()} nodes for visualization")
                 viz.plot_network_states(
                     G_plot,
                     states_plot,

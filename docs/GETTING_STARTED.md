@@ -249,7 +249,7 @@ These are optional dependencies. Install them to run the full test suite: `pip i
 Reduce graph size thresholds in `configs/config.yaml` under the `thresholds` section, or use the NetworKit backend for centrality (`pip install networkit`).
 
 **Clustering/metrics computation hangs on large graphs (>1M nodes)**
-NetworkX (pure Python) cannot compute triangle-based metrics (clustering, transitivity, small-world) on graphs with millions of nodes. The pipeline automatically selects the best available backend: **igraph** (C backend, fastest — included in core dependencies), then **NetworKit** (parallel C++ — `pip install networkit`), then NetworkX as last resort. If the pipeline still hangs, reduce the `large_graph_nodes` threshold in `configs/config.yaml` under `thresholds` to force the fast path earlier. Eigenvector centrality and small-world coefficient are automatically skipped for graphs exceeding `large_graph_nodes` (default: 10,000).
+The pipeline uses **igraph** (C backend) as the primary graph library, handling 30M+ node graphs natively. NetworkX is only used for small-world omega coefficient (≤1000 nodes) and network visualization layout (≤5000 nodes). If clustering or metrics hang, reduce the `large_graph_nodes` threshold in `configs/config.yaml`. Eigenvector centrality and small-world coefficient are automatically skipped for graphs exceeding `large_graph_nodes` (default: 10,000).
 
 **Matplotlib "Glyph missing from font" warnings**
 Harmless — occurs when subscript characters (like R₀) aren't in the default font. Install SciencePlots for better typography: `pip install SciencePlots`.

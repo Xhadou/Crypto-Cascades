@@ -21,7 +21,7 @@ Where:
 
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 from scipy.integrate import solve_ivp
 from scipy.special import expit
 from typing import Dict, List, Optional, Tuple, Union, Callable, Any, Literal, overload
@@ -248,98 +248,98 @@ class NetworkSEIR:
     
     def simulate_network_stochastic(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         initial_infected: List[int],
         t_max: int,
         fgi_values: Optional[np.ndarray] = None
     ) -> pd.DataFrame:
         """
         Run stochastic network simulation using discrete-time approach.
-        
+
         Args:
-            G: NetworkX graph
-            initial_infected: List of initially infected node IDs
+            G: igraph Graph (vertex indices are node IDs)
+            initial_infected: List of initially infected vertex indices
             t_max: Maximum time steps
             fgi_values: Fear & Greed Index values (one per timestep)
-            
+
         Returns:
             DataFrame with state counts over time
         """
+        N = G.vcount()
         self.logger.info(
             f"Running stochastic network SEIR simulation "
-            f"(N={G.number_of_nodes():,}, T={t_max})"
+            f"(N={N:,}, T={t_max})"
         )
-        
-        # Initialize node states
-        node_states = {node: State.SUSCEPTIBLE for node in G.nodes()}
+
+        # Initialize node states (keyed by vertex index)
+        node_states = {v: State.SUSCEPTIBLE for v in range(N)}
         for node in initial_infected:
-            if node in node_states:
+            if 0 <= node < N:
                 node_states[node] = State.INFECTED
-        
+
         # Track time in each state for transitions
-        time_in_state = {node: 0 for node in G.nodes()}
-        
+        time_in_state = {v: 0 for v in range(N)}
+
         results = []
-        
+
         for t in range(t_max):
             # Get effective beta
             if fgi_values is not None and t < len(fgi_values):
                 beta_eff = self.params.effective_beta(fgi_values[t])
             else:
                 beta_eff = self.params.beta
-            
+
             # Count current states
             counts: Dict[str, Any] = self._count_states(node_states)
             counts['t'] = t
             counts['beta_eff'] = beta_eff
             results.append(counts)
-            
+
             # Compute transitions
             new_states = node_states.copy()
-            
-            for node in G.nodes():
+
+            for node in range(N):
                 current_state = node_states[node]
                 new_state = self._node_transition(
-                    node, current_state, G, node_states, 
+                    node, current_state, G, node_states,
                     beta_eff, time_in_state[node]
                 )
-                
+
                 if new_state != current_state:
                     new_states[node] = new_state
                     time_in_state[node] = 0
                 else:
                     time_in_state[node] += 1
-            
+
             node_states = new_states
-            
+
         df = pd.DataFrame(results)
-        
+
         # Add fractions
-        N = G.number_of_nodes()
         for col in ['S', 'E', 'I', 'R']:
             df[f'{col}_frac'] = df[col] / N
-            
+
         return df
     
     def _node_transition(
         self,
         node: int,
         current_state: State,
-        G: nx.Graph,
+        G: ig.Graph,
         node_states: Dict[int, State],
         beta_eff: float,
         time_in_state: int
     ) -> State:
         """Compute state transition for a single node."""
-        
+
         if current_state == State.SUSCEPTIBLE:
             # S -> E: Contact with infected neighbor
             infected_neighbors = sum(
-                1 for n in G.neighbors(node) 
+                1 for n in G.neighbors(node)
                 if node_states.get(n) == State.INFECTED
             )
-            degree = G.degree(node)  # type: ignore[misc]
-            
+            degree = G.degree(node)
+
             if degree > 0 and infected_neighbors > 0:
                 # Probability based on fraction of infected neighbors
                 p_expose = 1 - (1 - beta_eff) ** infected_neighbors
@@ -360,7 +360,7 @@ class NetworkSEIR:
             # R -> S: Immunity waning
             if self.rng.random() < self.params.omega:
                 return State.SUSCEPTIBLE
-                
+
         return current_state
     
     def _count_states(self, node_states: Dict[int, State]) -> Dict[str, int]:
@@ -372,17 +372,17 @@ class NetworkSEIR:
     
     @overload
     def compute_network_r0(
-        self, G: nx.Graph, n_bootstrap: int = ..., *, return_ci: Literal[False] = ...
+        self, G: ig.Graph, n_bootstrap: int = ..., *, return_ci: Literal[False] = ...
     ) -> float: ...
 
     @overload
     def compute_network_r0(
-        self, G: nx.Graph, n_bootstrap: int = ..., *, return_ci: Literal[True] = ...
+        self, G: ig.Graph, n_bootstrap: int = ..., *, return_ci: Literal[True] = ...
     ) -> Tuple[float, Tuple[float, float]]: ...
 
     def compute_network_r0(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         n_bootstrap: int = 0,
         return_ci: bool = False
     ) -> Union[float, Tuple[float, Tuple[float, float]]]:
@@ -394,7 +394,7 @@ class NetworkSEIR:
         Where <k²>/<k> is the variance-to-mean ratio of degree.
 
         Args:
-            G: NetworkX graph
+            G: igraph Graph
             n_bootstrap: Number of bootstrap samples for CI (0 = no CI)
             return_ci: Whether to return confidence interval tuple
 
@@ -402,7 +402,7 @@ class NetworkSEIR:
             If return_ci=False: Network-adjusted R₀ (float)
             If return_ci=True: Tuple of (R₀, (lower_CI, upper_CI))
         """
-        degrees = [d for _, d in G.degree()]  # type: ignore[misc]
+        degrees = G.degree()
 
         if len(degrees) == 0:
             return (0.0, (0.0, 0.0)) if return_ci else 0.0
@@ -687,7 +687,7 @@ class NetworkSEIR:
     
     def simulate_gillespie(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         initial_infected: List[int],
         t_max: float,
         fgi_values: Optional[np.ndarray] = None,
@@ -702,8 +702,8 @@ class NetworkSEIR:
         proper epidemic dynamics.
 
         Args:
-            G: NetworkX graph
-            initial_infected: List of initially infected node IDs
+            G: igraph Graph (vertex indices are node IDs)
+            initial_infected: List of initially infected vertex indices
             t_max: Maximum simulation time
             fgi_values: Optional FGI values (indexed by integer time)
             record_interval: Time interval for recording state counts
@@ -713,23 +713,22 @@ class NetworkSEIR:
         Returns:
             DataFrame with state counts over time
         """
+        N = G.vcount()
         self.logger.info(
-            f"Running Gillespie simulation (N={G.number_of_nodes():,}, T={t_max})"
+            f"Running Gillespie simulation (N={N:,}, T={t_max})"
         )
 
-        # Validate graph connectivity — use nx.is_connected on a view,
-        # not G.to_undirected() which copies the entire graph (~8 GB).
+        # Validate graph connectivity
         if G.is_directed():
-            is_conn = nx.is_weakly_connected(G)
-            if not is_conn:
-                n_components = nx.number_weakly_connected_components(G)
+            if not G.is_connected(mode='weak'):
+                n_components = len(G.connected_components(mode='weak'))
                 self.logger.warning(
                     f"Graph is disconnected ({n_components} components). "
                     "Simulation may not reach all nodes."
                 )
         else:
-            if not nx.is_connected(G):
-                n_components = nx.number_connected_components(G)
+            if not G.is_connected():
+                n_components = len(G.connected_components())
                 self.logger.warning(
                     f"Graph is disconnected ({n_components} components). "
                     "Simulation may not reach all nodes."
@@ -740,7 +739,8 @@ class NetworkSEIR:
         # everything else is implicitly SUSCEPTIBLE.
         from collections import defaultdict
         node_states = defaultdict(lambda: State.SUSCEPTIBLE)
-        infected_set = set(initial_infected) & set(G.nodes())
+        all_indices = set(range(N))
+        infected_set = set(initial_infected) & all_indices
         for node in infected_set:
             node_states[node] = State.INFECTED
 
@@ -749,12 +749,11 @@ class NetworkSEIR:
         neighbors = getattr(G, '_cached_neighbors', None)
         if neighbors is None:
             self.logger.info("  Building neighbor lookup table...")
-            neighbors = {node: list(G.neighbors(node)) for node in G.nodes()}
+            neighbors = {v: G.neighbors(v) for v in range(N)}
 
         # Track nodes in each state for efficient rate calculation
-        all_nodes = set(G.nodes())
         I_nodes = infected_set.copy()
-        S_nodes = all_nodes - I_nodes
+        S_nodes = all_indices - I_nodes
         E_nodes = set()
         R_nodes = set()
 
@@ -773,7 +772,7 @@ class NetworkSEIR:
         })
 
         iteration = 0
-        max_iterations = int(t_max * G.number_of_nodes() * 10)  # Safety limit
+        max_iterations = int(t_max * N * 10)  # Safety limit
 
         while t < t_max and iteration < max_iterations:
             iteration += 1
@@ -899,7 +898,6 @@ class NetworkSEIR:
         df = pd.DataFrame(results)
 
         # Add fractions
-        N = G.number_of_nodes()
         for col in ['S', 'E', 'I', 'R']:
             df[f'{col}_frac'] = df[col] / N
 
@@ -912,7 +910,7 @@ class NetworkSEIR:
 
     def run_monte_carlo(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         initial_infected_count: int,
         t_max: int,
         n_simulations: int = 100,
@@ -920,23 +918,22 @@ class NetworkSEIR:
     ) -> Dict:
         """
         Run multiple stochastic simulations for uncertainty quantification.
-        
+
         Args:
-            G: NetworkX graph
+            G: igraph Graph
             initial_infected_count: Number of initial infected
             t_max: Maximum time
             n_simulations: Number of simulation runs
             fgi_values: Fear & Greed Index values
-            
+
         Returns:
             Dict with mean, std, and percentiles for each state
         """
         self.logger.info(f"Running {n_simulations} Monte Carlo simulations...")
 
         all_results = []
-        # Materialise the node list once (needed for rng.choice).
-        # Use a numpy array to avoid repeated list→array conversions.
-        nodes = np.array(list(G.nodes()))
+        # igraph uses 0-based integer indices natively
+        nodes = np.arange(G.vcount())
 
         # Pre-build the neighbor lookup ONCE and cache it on the graph
         # so simulate_network_stochastic reuses it across all runs
@@ -944,7 +941,7 @@ class NetworkSEIR:
         if not hasattr(G, '_cached_neighbors'):
             self.logger.info("  Pre-building neighbor lookup (once)...")
             G._cached_neighbors = {
-                node: list(G.neighbors(node)) for node in G.nodes()
+                v: G.neighbors(v) for v in range(G.vcount())
             }
 
         # Spawn independent child seeds for each run
@@ -999,7 +996,7 @@ class NetworkSEIR:
 
     def _single_mc_simulation(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         initial_infected_count: int,
         t_max: int,
         fgi_values: Optional[np.ndarray],
@@ -1009,7 +1006,7 @@ class NetworkSEIR:
         Execute a single Monte Carlo simulation (picklable for multiprocessing).
 
         Args:
-            G: NetworkX graph
+            G: igraph Graph
             initial_infected_count: Number of initial infected
             t_max: Maximum time
             fgi_values: Fear & Greed Index values
@@ -1019,7 +1016,7 @@ class NetworkSEIR:
             DataFrame with simulation results for this run
         """
         from numpy.random import SeedSequence
-        nodes = list(G.nodes())
+        nodes = list(range(G.vcount()))
         # Create a deterministic child seed for this run
         ss = SeedSequence(self.random_seed)
         child_seed = ss.spawn(run_idx + 1)[run_idx]
@@ -1045,7 +1042,7 @@ class NetworkSEIR:
 
     def run_monte_carlo_parallel(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         initial_infected_count: int,
         t_max: int,
         n_simulations: int = 100,
@@ -1054,18 +1051,18 @@ class NetworkSEIR:
     ) -> Dict:
         """
         Run Monte Carlo simulations using parallel workers.
-        
+
         Falls back to sequential execution if n_workers=1 or
         if the concurrent.futures import fails.
-        
+
         Args:
-            G: NetworkX graph
+            G: igraph Graph
             initial_infected_count: Number of initial infected
             t_max: Maximum time
             n_simulations: Number of simulation runs
             fgi_values: Fear & Greed Index values
             n_workers: Number of parallel workers (None = cpu_count)
-            
+
         Returns:
             Dict with mean, std, and percentiles for each state
         """
@@ -1234,7 +1231,7 @@ def main():
     
     # Test network-based simulation
     print("\nTesting network simulation...")
-    G = nx.barabasi_albert_graph(1000, 3, seed=42)
+    G = ig.Graph.Barabasi(1000, 3)
     
     results_network = model.simulate_network_stochastic(
         G, initial_infected=[0, 1, 2], t_max=50

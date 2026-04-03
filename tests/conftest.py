@@ -7,7 +7,7 @@ Shared fixtures and configuration for all tests.
 import pytest
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 import tempfile
 from pathlib import Path
 
@@ -27,7 +27,9 @@ def set_random_seed(random_seed):
 @pytest.fixture(scope="session")
 def sample_graph():
     """Create a sample graph for testing."""
-    return nx.barabasi_albert_graph(500, 3, seed=42)
+    g = ig.Graph.Barabasi(500, 3)
+    g.vs['name'] = list(range(g.vcount()))
+    return g
 
 
 @pytest.fixture(scope="session")

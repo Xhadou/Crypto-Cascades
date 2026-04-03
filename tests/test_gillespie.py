@@ -5,7 +5,7 @@ Tests for Gillespie stochastic simulation implementation.
 import pytest
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 
 from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
 
@@ -18,7 +18,9 @@ def model():
 
 @pytest.fixture
 def test_graph():
-    return nx.barabasi_albert_graph(100, 3, seed=42)
+    g = ig.Graph.Barabasi(100, 3)
+    g.vs['name'] = list(range(100))
+    return g
 
 
 class TestGillespieSimulation:
@@ -36,7 +38,7 @@ class TestGillespieSimulation:
         assert result['I'].min() >= 0
 
         # Population conservation
-        N = test_graph.number_of_nodes()
+        N = test_graph.vcount()
         total = result['S'] + result['E'] + result['I'] + result['R']
         assert np.all(total == N), "Population must be conserved at every time step"
 
@@ -76,11 +78,11 @@ class TestGillespieSimulation:
 
     def test_gillespie_disconnected_graph(self, model):
         """Test Gillespie on a disconnected graph produces a result."""
-        G = nx.Graph()
-        G.add_nodes_from(range(20))
         # Two disconnected cliques
-        G.add_edges_from([(i, j) for i in range(10) for j in range(i + 1, 10)])
-        G.add_edges_from([(i, j) for i in range(10, 20) for j in range(i + 1, 20)])
+        edges = [(i, j) for i in range(10) for j in range(i + 1, 10)]
+        edges += [(i, j) for i in range(10, 20) for j in range(i + 1, 20)]
+        G = ig.Graph(n=20, edges=edges, directed=False)
+        G.vs['name'] = list(range(20))
 
         result = model.simulate_gillespie(
             G, initial_infected=[0], t_max=50
@@ -134,8 +136,8 @@ class TestNetworkR0:
         assert lo <= r0 <= hi
 
     def test_network_r0_single_node_graph(self, model):
-        G = nx.Graph()
-        G.add_node(0)
+        G = ig.Graph(n=1, directed=False)
+        G.vs['name'] = [0]
         r0 = model.compute_network_r0(G)
         assert r0 == 0.0
 

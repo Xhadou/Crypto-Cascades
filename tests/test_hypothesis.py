@@ -12,10 +12,17 @@ Tests statistical hypothesis testing functionality including:
 import pytest
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 
 from src.hypothesis.hypothesis_tester import HypothesisTester, HypothesisResult
 from src.estimation.estimator import EstimationResult
+
+
+def _set_names(g: ig.Graph) -> ig.Graph:
+    """Set vs['name'] and _name_to_idx cache on a generated igraph Graph."""
+    g.vs['name'] = list(range(g.vcount()))
+    g['_name_to_idx'] = {i: i for i in range(g.vcount())}
+    return g
 
 
 class TestHypothesisResult:
@@ -72,7 +79,7 @@ class TestHypothesisTester:
     @pytest.fixture
     def test_graph(self):
         """Create a test graph."""
-        return nx.barabasi_albert_graph(500, 3, seed=42)
+        return _set_names(ig.Graph.Barabasi(500, 3))
     
     @pytest.fixture
     def test_state_history(self):
@@ -115,7 +122,7 @@ class TestHypothesisTester:
     
     def test_h2_detects_amplification(self, tester, test_params):
         """Test H2 detects network amplification in scale-free graph."""
-        G = nx.barabasi_albert_graph(1000, 3, seed=42)
+        G = _set_names(ig.Graph.Barabasi(1000, 3))
         result = tester.test_h2_network_amplification(G, test_params)
         
         # Scale-free networks should show amplification (network factor > 1)
@@ -158,18 +165,20 @@ class TestHypothesisTester:
     def test_h5_detects_community_structure(self, tester):
         """Test H5 detects community clustering."""
         # Create a graph with clear community structure
-        G1 = nx.complete_graph(50)
-        G2 = nx.complete_graph(50)
-        G = nx.disjoint_union(G1, G2)
-        
+        G1 = ig.Graph.Full(50)
+        G2 = ig.Graph.Full(50)
+        G = ig.disjoint_union([G1, G2])
+        G.vs['name'] = list(range(G.vcount()))
+        G['_name_to_idx'] = {i: i for i in range(G.vcount())}
+
         # Add a few inter-community edges
         G.add_edge(0, 50)
         G.add_edge(25, 75)
-        
+
         state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
-        
+
         result = tester.test_h5_community_clustering(G, state_history)
-        
+
         # Should detect strong within-community connectivity
         assert result.additional_metrics['n_communities'] >= 2
     
@@ -206,7 +215,7 @@ class TestStatisticalValidity:
     
     def test_pvalue_in_valid_range(self, tester):
         """Test that p-values are in [0, 1]."""
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        G = _set_names(ig.Graph.Barabasi(200, 3))
         params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.8)
         
         result = tester.test_h2_network_amplification(G, params)
@@ -215,7 +224,7 @@ class TestStatisticalValidity:
     
     def test_confidence_interval_ordering(self, tester):
         """Test that CI lower <= CI upper."""
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        G = _set_names(ig.Graph.Barabasi(200, 3))
         params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.8)
         
         result = tester.test_h2_network_amplification(G, params)
@@ -224,7 +233,7 @@ class TestStatisticalValidity:
     
     def test_reject_null_consistency(self, tester):
         """Test that reject_null is consistent with p-value and alpha."""
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        G = _set_names(ig.Graph.Barabasi(200, 3))
         params = EstimationResult(beta=0.3, sigma=0.2, gamma=0.1, r_squared=0.8)
         
         result = tester.test_h2_network_amplification(G, params)
@@ -248,7 +257,7 @@ class TestH2NullModel:
 
     def test_h2_compares_against_null_models(self, tester, test_params):
         """H2 should test network factor against null models, not against 1."""
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        G = _set_names(ig.Graph.Barabasi(200, 3))
         result = tester.test_h2_network_amplification(G, test_params)
         # Result should contain null model comparison info
         assert 'null_model_factors' in result.additional_metrics
@@ -256,7 +265,7 @@ class TestH2NullModel:
 
     def test_h2_null_model_p_value_used(self, tester, test_params):
         """H2 p-value should come from null model comparison, not bootstrap >1."""
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        G = _set_names(ig.Graph.Barabasi(200, 3))
         result = tester.test_h2_network_amplification(G, test_params)
         # The p-value should equal the null model comparison p-value
         assert result.p_value == result.additional_metrics['observed_vs_null_p']
@@ -269,7 +278,7 @@ class TestH2NullModel:
         model null (which preserves the degree sequence) should produce very
         similar network factors. The test should not reject.
         """
-        G = nx.random_regular_graph(6, 200, seed=42)
+        G = _set_names(ig.Graph.K_Regular(200, 6))
         result = tester.test_h2_network_amplification(G, test_params, n_null=200)
         # For a regular graph the observed factor should be close to the null
         # distribution, so the effect size should be small.
@@ -282,7 +291,7 @@ class TestH2NullModel:
 
     def test_h2_null_model_factors_list(self, tester, test_params):
         """null_model_factors should be a non-empty list of floats."""
-        G = nx.barabasi_albert_graph(100, 3, seed=42)
+        G = _set_names(ig.Graph.Barabasi(100, 3))
         result = tester.test_h2_network_amplification(G, test_params)
         factors = result.additional_metrics['null_model_factors']
         assert isinstance(factors, list)
@@ -291,7 +300,7 @@ class TestH2NullModel:
 
     def test_h2_network_factor_still_in_metrics(self, tester, test_params):
         """The observed network factor should still be reported."""
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        G = _set_names(ig.Graph.Barabasi(200, 3))
         result = tester.test_h2_network_amplification(G, test_params)
         assert 'network_factor' in result.additional_metrics
         assert result.additional_metrics['network_factor'] > 1
@@ -507,13 +516,13 @@ class TestH4Survival:
     def test_h4_uses_cox_model(self):
         """H4 should use Cox PH model, not just rank correlation."""
         tester = HypothesisTester(alpha=0.05, random_seed=42)
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
-        degrees = dict(G.degree())
+        G = _set_names(ig.Graph.Barabasi(200, 3))
+        degrees = {G.vs['name'][i]: d for i, d in enumerate(G.degree())}
         np.random.seed(42)
         # Higher degree -> earlier infection (negative correlation)
         infection_times = {
             n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
-            for n in list(G.nodes())[:100]
+            for n in list(G.vs['name'])[:100]
         }
         infection_times_df = pd.DataFrame([
             {'node': n, 'infection_time': t}
@@ -529,13 +538,13 @@ class TestH4Survival:
     def test_h4_hazard_ratio_greater_than_one(self):
         """Higher degree should predict faster infection (HR > 1)."""
         tester = HypothesisTester(alpha=0.05, random_seed=42)
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
-        degrees = dict(G.degree())
+        G = _set_names(ig.Graph.Barabasi(200, 3))
+        degrees = {G.vs['name'][i]: d for i, d in enumerate(G.degree())}
         np.random.seed(42)
         # Strong signal: higher degree -> much earlier infection
         infection_times = {
             n: max(200 - degrees[n] * 5 + np.random.normal(0, 2), 0.01)
-            for n in list(G.nodes())[:150]
+            for n in list(G.vs['name'])[:150]
         }
         infection_times_df = pd.DataFrame([
             {'node': n, 'infection_time': t}
@@ -552,12 +561,12 @@ class TestH4Survival:
     def test_h4_cox_p_value_is_primary(self):
         """When Cox PH succeeds, its p-value should be the primary p-value."""
         tester = HypothesisTester(alpha=0.05, random_seed=42)
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
-        degrees = dict(G.degree())
+        G = _set_names(ig.Graph.Barabasi(200, 3))
+        degrees = {G.vs['name'][i]: d for i, d in enumerate(G.degree())}
         np.random.seed(42)
         infection_times = {
             n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
-            for n in list(G.nodes())[:100]
+            for n in list(G.vs['name'])[:100]
         }
         infection_times_df = pd.DataFrame([
             {'node': n, 'infection_time': t}
@@ -573,12 +582,12 @@ class TestH4Survival:
     def test_h4_mann_whitney_still_reported(self):
         """Mann-Whitney U result should still be in additional_metrics."""
         tester = HypothesisTester(alpha=0.05, random_seed=42)
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
-        degrees = dict(G.degree())
+        G = _set_names(ig.Graph.Barabasi(200, 3))
+        degrees = {G.vs['name'][i]: d for i, d in enumerate(G.degree())}
         np.random.seed(42)
         infection_times = {
             n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
-            for n in list(G.nodes())[:100]
+            for n in list(G.vs['name'])[:100]
         }
         infection_times_df = pd.DataFrame([
             {'node': n, 'infection_time': t}
@@ -595,12 +604,12 @@ class TestH4Survival:
     def test_h4_cox_concordance_reported(self):
         """Cox model concordance index should be reported."""
         tester = HypothesisTester(alpha=0.05, random_seed=42)
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
-        degrees = dict(G.degree())
+        G = _set_names(ig.Graph.Barabasi(200, 3))
+        degrees = {G.vs['name'][i]: d for i, d in enumerate(G.degree())}
         np.random.seed(42)
         infection_times = {
             n: max(100 - degrees[n] + np.random.normal(0, 5), 0.01)
-            for n in list(G.nodes())[:100]
+            for n in list(G.vs['name'])[:100]
         }
         infection_times_df = pd.DataFrame([
             {'node': n, 'infection_time': t}
@@ -624,9 +633,11 @@ class TestH5Permutation:
         tester = HypothesisTester(alpha=0.05, random_seed=42)
 
         # Create graph with clear community structure
-        G1 = nx.complete_graph(50)
-        G2 = nx.complete_graph(50)
-        G = nx.disjoint_union(G1, G2)
+        G1 = ig.Graph.Full(50)
+        G2 = ig.Graph.Full(50)
+        G = ig.disjoint_union([G1, G2])
+        G.vs['name'] = list(range(G.vcount()))
+        G['_name_to_idx'] = {i: i for i in range(G.vcount())}
         G.add_edge(0, 50)
         G.add_edge(25, 75)
 
@@ -639,7 +650,7 @@ class TestH5Permutation:
         """H5 rejection should be based on permutation p-value."""
         tester = HypothesisTester(alpha=0.05, random_seed=42)
 
-        G = nx.barabasi_albert_graph(200, 3, seed=42)
+        G = _set_names(ig.Graph.Barabasi(200, 3))
         state_history = pd.DataFrame({'t': range(10), 'I': range(10)})
 
         result = tester.test_h5_community_clustering(G, state_history)

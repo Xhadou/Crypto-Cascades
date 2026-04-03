@@ -12,7 +12,7 @@ Tests the core SEIR model functionality including:
 import pytest
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 
 from src.epidemic_model.network_seir import NetworkSEIR, SEIRParameters
 from src.state_engine.state_assigner import State
@@ -180,7 +180,9 @@ class TestNetworkSEIRStochastic:
     @pytest.fixture
     def test_graph(self):
         """Create a test graph."""
-        return nx.barabasi_albert_graph(200, 3, seed=42)
+        g = ig.Graph.Barabasi(200, 3)
+        g.vs['name'] = list(range(200))
+        return g
     
     def test_network_simulation_returns_dataframe(self, model, test_graph):
         """Test that network simulation returns a DataFrame."""
@@ -199,7 +201,7 @@ class TestNetworkSEIRStochastic:
     
     def test_network_population_conservation(self, model, test_graph):
         """Test population conservation in network simulation."""
-        N = test_graph.number_of_nodes()
+        N = test_graph.vcount()
         result = model.simulate_network_stochastic(
             test_graph, initial_infected=[0], t_max=30
         )
@@ -228,44 +230,46 @@ class TestNetworkR0:
     
     def test_r0_regular_graph(self, model):
         """Test R0 for regular graph (all nodes same degree)."""
-        G = nx.random_regular_graph(4, 100, seed=42)
+        G = ig.Graph.K_Regular(100, 4)
         r0_network = model.compute_network_r0(G)
-        
+
         # For regular graph, <k²>/<k> ≈ k, so R0_network ≈ R0_basic * k
         # R0_basic = 3, k = 4, so R0_network ≈ 12
         assert 10 < r0_network < 14
-    
+
     def test_r0_scale_free_graph(self, model):
         """Test that scale-free graphs have higher network R0."""
-        G_regular = nx.random_regular_graph(6, 500, seed=42)
-        G_scalefree = nx.barabasi_albert_graph(500, 3, seed=42)
-        
+        G_regular = ig.Graph.K_Regular(500, 6)
+        G_scalefree = ig.Graph.Barabasi(500, 3)
+
         r0_regular = model.compute_network_r0(G_regular)
         r0_scalefree = model.compute_network_r0(G_scalefree)
-        
+
         # Scale-free networks should have higher R0 due to degree variance
         assert r0_scalefree > r0_regular
-    
+
     def test_r0_empty_graph_is_zero(self, model):
         """Test that empty graph has R0 of 0."""
-        G = nx.Graph()
+        G = ig.Graph()
         r0 = model.compute_network_r0(G)
         assert r0 == 0
 
 
 class TestMonteCarloSimulations:
     """Tests for Monte Carlo ensemble simulations."""
-    
+
     @pytest.fixture
     def model(self):
         """Create model for testing."""
         params = SEIRParameters(beta=0.4, sigma=0.3, gamma=0.15)
         return NetworkSEIR(params, random_seed=42)
-    
+
     @pytest.fixture
     def test_graph(self):
         """Create test graph."""
-        return nx.barabasi_albert_graph(100, 3, seed=42)
+        g = ig.Graph.Barabasi(100, 3)
+        g.vs['name'] = list(range(100))
+        return g
     
     def test_monte_carlo_returns_dict(self, model, test_graph):
         """Test Monte Carlo returns a dictionary."""
@@ -453,7 +457,8 @@ class TestRNG:
     def test_rng_different_seeds_differ(self):
         """Two models with different seeds should produce different stochastic results."""
         params = SEIRParameters(beta=0.4, sigma=0.3, gamma=0.15, omega=0.0)
-        G = nx.barabasi_albert_graph(100, 3, seed=42)
+        G = ig.Graph.Barabasi(100, 3)
+        G.vs['name'] = list(range(100))
         m1 = NetworkSEIR(params, random_seed=42)
         m2 = NetworkSEIR(params, random_seed=99)
         r1 = m1.simulate_network_stochastic(G, initial_infected=[0, 1, 2], t_max=20)
@@ -464,7 +469,8 @@ class TestRNG:
     def test_rng_stochastic_reproducibility(self):
         """Same seed should produce identical stochastic simulation results."""
         params = SEIRParameters(beta=0.4, sigma=0.3, gamma=0.15, omega=0.0)
-        G = nx.barabasi_albert_graph(100, 3, seed=42)
+        G = ig.Graph.Barabasi(100, 3)
+        G.vs['name'] = list(range(100))
         m1 = NetworkSEIR(params, random_seed=42)
         m2 = NetworkSEIR(params, random_seed=42)
         r1 = m1.simulate_network_stochastic(G, initial_infected=[0, 1, 2], t_max=20)

@@ -20,7 +20,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 from scipy import stats
 
 from src.utils.logger import get_logger
@@ -106,7 +106,7 @@ class TrustNetworkValidator:
     def compare_network_topology(
         self,
         snap_df: pd.DataFrame,
-        orbitaal_graph: nx.Graph,
+        orbitaal_graph: ig.Graph,
     ) -> Dict:
         """
         Compare structural properties between SNAP trust network and
@@ -122,18 +122,18 @@ class TrustNetworkValidator:
         Returns:
             Dict with comparison metrics.
         """
-        # Build SNAP graph
-        snap_graph = nx.from_pandas_edgelist(
-            snap_df, source='source', target='target',
-            create_using=nx.DiGraph()
-        )
+        # Build SNAP graph (igraph)
+        nodes = sorted(set(snap_df['source'].values) | set(snap_df['target'].values))
+        n2i = {n: i for i, n in enumerate(nodes)}
+        src_idx = snap_df['source'].map(n2i).values
+        tgt_idx = snap_df['target'].map(n2i).values
+        edges = list(zip(src_idx.tolist(), tgt_idx.tolist()))
+        snap_graph = ig.Graph(n=len(nodes), edges=edges, directed=True)
+        snap_graph.vs['name'] = nodes
+        snap_graph['_name_to_idx'] = n2i
 
-        snap_degrees = np.array(
-            [d for _, d in snap_graph.degree()], dtype=float
-        )
-        orb_degrees = np.array(
-            [d for _, d in orbitaal_graph.degree()], dtype=float
-        )
+        snap_degrees = np.array(snap_graph.degree(), dtype=float)
+        orb_degrees = np.array(orbitaal_graph.degree(), dtype=float)
 
         # KS test on degree distributions
         if len(snap_degrees) > 0 and len(orb_degrees) > 0:
@@ -149,14 +149,14 @@ class TrustNetworkValidator:
         orb_cc = _metrics.compute_clustering_coefficients(orbitaal_graph)
         orb_clustering = orb_cc.get('avg_local_clustering', 0.0) or 0.0
 
-        snap_density = nx.density(snap_graph)
-        orb_density = nx.density(orbitaal_graph)
+        snap_density = snap_graph.density()
+        orb_density = orbitaal_graph.density()
 
         results = {
-            'snap_nodes': snap_graph.number_of_nodes(),
-            'snap_edges': snap_graph.number_of_edges(),
-            'orbitaal_nodes': orbitaal_graph.number_of_nodes(),
-            'orbitaal_edges': orbitaal_graph.number_of_edges(),
+            'snap_nodes': snap_graph.vcount(),
+            'snap_edges': snap_graph.ecount(),
+            'orbitaal_nodes': orbitaal_graph.vcount(),
+            'orbitaal_edges': orbitaal_graph.ecount(),
             'snap_mean_degree': float(snap_degrees.mean()) if len(snap_degrees) else 0.0,
             'orbitaal_mean_degree': float(orb_degrees.mean()) if len(orb_degrees) else 0.0,
             'degree_ks_statistic': ks_stat,
@@ -373,7 +373,7 @@ class TrustNetworkValidator:
     def run_all_validations(
         self,
         snap_dir: str,
-        orbitaal_graph: nx.Graph,
+        orbitaal_graph: ig.Graph,
         node_states: Optional[Dict] = None,
         infection_times_df: Optional[pd.DataFrame] = None,
     ) -> Dict:

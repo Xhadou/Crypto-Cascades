@@ -4,12 +4,15 @@ pandas>=2.0.0
 scipy>=1.10.0
 pyarrow>=14.0.0
 
-# Network Analysis
-networkx>=3.1
-powerlaw>=1.5
+# Network Analysis (igraph is the primary graph library)
 python-igraph>=0.11.0
 leidenalg>=0.11.0
+powerlaw>=1.5
 networkit>=11.0
+
+# Optional: NetworkX (only used for small-world omega coefficient
+# and network visualization layout on ≤5000 node subgraphs)
+networkx>=3.1
 
 # Epidemic Modeling
 ndlib>=5.1.0

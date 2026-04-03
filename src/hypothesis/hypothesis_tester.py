@@ -10,9 +10,11 @@ H4: High-centrality nodes accelerate spread
 H5: Community structure creates infection clusters
 """
 
+import random
+
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 from scipy import stats
 from scipy.stats import pearsonr, spearmanr, ks_2samp
 from typing import Dict, List, Optional, Tuple, Union
@@ -24,6 +26,7 @@ from src.estimation.estimator import ParameterEstimator, EstimationResult
 from src.state_engine.state_assigner import State, StateAssigner
 from src.network_analysis.metrics import NetworkMetrics
 from src.network_analysis.community_detection import CommunityDetector
+from src.utils.graph_adapter import name_to_idx
 from src.utils.logger import get_logger
 
 
@@ -73,7 +76,7 @@ class HypothesisTester:
         
     def test_all(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         state_history: pd.DataFrame,
         fgi_values: np.ndarray,
         estimated_params: EstimationResult,
@@ -125,7 +128,7 @@ class HypothesisTester:
         self.logger.info("All hypothesis tests complete.")
 
         # Add null model comparison as sanity check
-        if G.number_of_nodes() < 5000:
+        if G.vcount() < 5000:
             try:
                 null_comparison = self.compare_against_null_networks(
                     G, estimated_params, n_null_networks=50
@@ -638,7 +641,7 @@ class HypothesisTester:
 
     def compare_against_null_networks(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         estimated_params: EstimationResult,
         n_null_networks: int = 100,
         null_types: Optional[List[str]] = None
@@ -670,9 +673,9 @@ class HypothesisTester:
         model = NetworkSEIR(estimated_params.to_params())
         observed_r0: float = float(model.compute_network_r0(G))
 
-        n = G.number_of_nodes()
-        m = G.number_of_edges()
-        degrees = [d for _, d in G.degree()]  # type: ignore[misc]
+        n = G.vcount()
+        m = G.ecount()
+        degrees = G.degree()
 
         null_r0s: Dict[str, List[float]] = {nt: [] for nt in null_types}
 
@@ -681,7 +684,8 @@ class HypothesisTester:
 
             if 'erdos_renyi' in null_types:
                 try:
-                    G_er = nx.gnm_random_graph(n, m, seed=seed)
+                    ig.set_random_number_generator(random.Random(seed))
+                    G_er = ig.Graph.Erdos_Renyi(n, m=m)
                     null_r0s['erdos_renyi'].append(float(model.compute_network_r0(G_er)))
                 except Exception:
                     pass
@@ -689,18 +693,19 @@ class HypothesisTester:
             if 'configuration' in null_types:
                 try:
                     # Configuration model preserves degree sequence
-                    G_config = nx.configuration_model(degrees, seed=seed)
-                    G_config = nx.Graph(G_config)  # Remove multi-edges
-                    G_config.remove_edges_from(nx.selfloop_edges(G_config))
+                    ig.set_random_number_generator(random.Random(seed))
+                    G_config = ig.Graph.Degree_Sequence(degrees, method='simple')
+                    G_config.simplify()
                     null_r0s['configuration'].append(float(model.compute_network_r0(G_config)))
                 except Exception:
                     pass
 
             if 'rewired' in null_types:
                 try:
-                    # Double-edge swap preserves degree sequence exactly
+                    # Rewiring preserves degree sequence exactly
                     G_rewired = G.copy()
-                    nx.double_edge_swap(G_rewired, nswap=m*2, max_tries=m*20, seed=seed)
+                    ig.set_random_number_generator(random.Random(seed))
+                    G_rewired.rewire(n=m * 2)
                     null_r0s['rewired'].append(float(model.compute_network_r0(G_rewired)))
                 except Exception:
                     pass
@@ -754,7 +759,7 @@ class HypothesisTester:
     
     def test_h2_network_amplification(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         estimated_params: EstimationResult,
         n_null: int = 500
     ) -> HypothesisResult:
@@ -783,8 +788,7 @@ class HypothesisTester:
         self.logger.info("Testing H2: Network amplifies contagion (null model comparison)...")
 
         # Compute observed network metrics
-        degree_view = G.degree()  # type: ignore[operator]
-        degrees = [d for _, d in degree_view]
+        degrees = G.degree()
         n_nodes = len(degrees)
         k_mean = float(np.mean(degrees))
         k2_mean = float(np.mean([d**2 for d in degrees]))
@@ -803,23 +807,23 @@ class HypothesisTester:
         # degree fixed, so the null tests whether higher-order structure (clustering,
         # assortativity, community structure) amplifies contagion beyond what the
         # degree distribution alone would predict.
-        # Note: nx.configuration_model creates a multigraph; converting to simple
-        # graph removes self-loops and multi-edges, slightly reducing effective
-        # degrees. This is the standard approach in network epidemiology.
+        # Note: ig.Graph.Degree_Sequence returns a simple graph directly.
+        # We call simplify() to ensure no self-loops or multi-edges remain.
+        # This is the standard approach in network epidemiology.
         rng = np.random.default_rng(self.random_seed)
         null_factors: List[float] = []
 
         for i in range(n_null):
             seed = int(rng.integers(0, 2**31))
             try:
-                G_null = nx.configuration_model(degrees, seed=seed)
-                G_null = nx.Graph(G_null)  # Remove multi-edges
-                G_null.remove_edges_from(nx.selfloop_edges(G_null))
-                null_degrees = [d for _, d in G_null.degree()]
+                ig.set_random_number_generator(random.Random(seed))
+                G_null = ig.Graph.Degree_Sequence(degrees, method='simple')
+                G_null.simplify()
+                null_degrees = G_null.degree()
                 k_mean_null = float(np.mean(null_degrees)) if null_degrees else 1.0
                 k2_mean_null = float(np.mean([d**2 for d in null_degrees])) if null_degrees else 1.0
                 null_factors.append(k2_mean_null / max(k_mean_null, 1e-10))
-            except (nx.NetworkXError, Exception):
+            except Exception:
                 pass
 
         if len(null_factors) >= 10:
@@ -1015,7 +1019,7 @@ class HypothesisTester:
     
     def test_h4_centrality_effect(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         state_history: pd.DataFrame,
         infection_times_df: Optional[pd.DataFrame] = None
     ) -> HypothesisResult:
@@ -1038,7 +1042,13 @@ class HypothesisTester:
         centrality = metrics.compute_centrality_measures(G, measures=['degree'], normalized=True)
         centrality = centrality.get('degree', {})
         if not centrality:
-            centrality = nx.degree_centrality(G)
+            # Compute degree centrality manually from igraph
+            n_nodes = G.vcount()
+            names = G.vs['name']
+            if n_nodes > 1:
+                centrality = {names[i]: d / (n_nodes - 1) for i, d in enumerate(G.degree())}
+            else:
+                centrality = {names[i]: 0.0 for i in range(n_nodes)}
 
         # Get infection times: prefer separately-passed infection_times_df,
         # then check state_history columns
@@ -1080,7 +1090,8 @@ class HypothesisTester:
             )
 
         # Filter to nodes that exist in both graph and infection data
-        nodes = [n for n in G.nodes() if n in infection_times and n in centrality]
+        graph_nodes = list(G.vs['name'])
+        nodes = [n for n in graph_nodes if n in infection_times and n in centrality]
 
         if len(nodes) < 20:
             self.logger.warning(f"Only {len(nodes)} nodes with infection data. Need at least 20.")
@@ -1168,8 +1179,10 @@ class HypothesisTester:
 
             max_time = max(infection_times.values()) + 1
             survival_data = []
-            for node in G.nodes():
-                deg = G.degree(node)
+            names = G.vs['name']
+            deg_list = G.degree()
+            for i, node in enumerate(names):
+                deg = deg_list[i]
                 infected = node in infection_times
                 time = infection_times.get(node, max_time)
                 survival_data.append({
@@ -1229,7 +1242,7 @@ class HypothesisTester:
     
     def test_h5_community_clustering(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         state_history: pd.DataFrame
     ) -> HypothesisResult:
         """
@@ -1271,7 +1284,9 @@ class HypothesisTester:
                 state_history['state'].isin(['I', State.INFECTED.value if hasattr(State, 'INFECTED') else 'I'])
             ]
             if not infection_events.empty:
-                infected_nodes = set(infection_events['node'].unique()) & set(G.nodes())
+                graph_node_set = set(G.vs['name'])
+                n2i = name_to_idx(G)
+                infected_nodes = set(infection_events['node'].unique()) & graph_node_set
                 # For each infected node, check if the infecting neighbor is in same community
                 for node in infected_nodes:
                     comm_node = node_to_community.get(node, -1)
@@ -1279,9 +1294,10 @@ class HypothesisTester:
                         continue
                     # Check neighbors that were infected before this node
                     try:
-                        neighbors = set(G.neighbors(node))
-                        if G.is_directed():
-                            neighbors.update(G.predecessors(node))  # type: ignore[union-attr]
+                        node_idx = n2i[node]
+                        nbr_indices = G.neighbors(node_idx)
+                        names = G.vs['name']
+                        neighbors = set(names[ni] for ni in nbr_indices)
                     except Exception:
                         continue
                     infected_neighbors = neighbors & infected_nodes
@@ -1302,7 +1318,10 @@ class HypothesisTester:
                 "H5: No per-node infection data available in state_history. "
                 "Falling back to static edge-based community analysis."
             )
-            for u, v in G.edges():
+            names = G.vs['name']
+            for edge in G.get_edgelist():
+                u = names[edge[0]]
+                v = names[edge[1]]
                 comm_u = node_to_community.get(u, -1)
                 comm_v = node_to_community.get(v, -1)
 
@@ -1344,15 +1363,18 @@ class HypothesisTester:
                         state_history['state'].isin(['I', State.INFECTED.value if hasattr(State, 'INFECTED') else 'I'])
                     ]
                     if not infection_events.empty:
-                        infected_nodes = set(infection_events['node'].unique()) & set(G.nodes())
+                        perm_graph_node_set = set(G.vs['name'])
+                        perm_n2i = name_to_idx(G)
+                        infected_nodes = set(infection_events['node'].unique()) & perm_graph_node_set
+                        perm_names = G.vs['name']
                         for node in infected_nodes:
                             comm_node = shuffled_partition.get(node, -1)
                             if comm_node == -1:
                                 continue
                             try:
-                                neighbors = set(G.neighbors(node))
-                                if G.is_directed():
-                                    neighbors.update(G.predecessors(node))
+                                node_idx = perm_n2i[node]
+                                nbr_indices = G.neighbors(node_idx)
+                                neighbors = set(perm_names[ni] for ni in nbr_indices)
                             except Exception:
                                 continue
                             infected_neighbors = neighbors & infected_nodes
@@ -1365,7 +1387,10 @@ class HypothesisTester:
                                 else:
                                     b += 1
             else:
-                for u, v in G.edges():
+                perm_edge_names = G.vs['name']
+                for edge in G.get_edgelist():
+                    u = perm_edge_names[edge[0]]
+                    v = perm_edge_names[edge[1]]
                     comm_u = shuffled_partition.get(u, -1)
                     comm_v = shuffled_partition.get(v, -1)
                     if comm_u == comm_v and comm_u != -1:
@@ -1393,9 +1418,10 @@ class HypothesisTester:
         # Pre-compute per-edge community match as a boolean array.
         # This avoids materialising a new list of edge tuples per bootstrap
         # iteration — only an integer index array is resampled.
+        bootstrap_names = G.vs['name']
         edge_within = np.array([
-            node_to_community.get(u, -1) == node_to_community.get(v, -1)
-            for u, v in G.edges()
+            node_to_community.get(bootstrap_names[e[0]], -1) == node_to_community.get(bootstrap_names[e[1]], -1)
+            for e in G.get_edgelist()
         ])
         n_edges = len(edge_within)
         for _ in range(n_bootstrap):
@@ -1527,12 +1553,12 @@ class HypothesisTester:
 
 def main():
     """Test hypothesis testing module."""
-    import networkx as nx
-    
     print("Testing hypothesis testing module...")
-    
+
     # Create test data
-    G = nx.barabasi_albert_graph(1000, 3, seed=42)
+    G = ig.Graph.Barabasi(1000, 3)
+    G.vs['name'] = list(range(G.vcount()))
+    G['_name_to_idx'] = {i: i for i in range(G.vcount())}
     
     # Mock state history
     state_history = pd.DataFrame({

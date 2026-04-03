@@ -6,7 +6,7 @@ import math
 import pytest
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 
 from src.validation.trust_network_validator import TrustNetworkValidator
 
@@ -60,7 +60,8 @@ def snap_df():
 @pytest.fixture
 def orbitaal_graph():
     """Small BA graph with integer node IDs overlapping some SNAP IDs."""
-    G = nx.barabasi_albert_graph(100, 3, seed=42)
+    G = ig.Graph.Barabasi(100, 3)
+    G.vs['name'] = list(range(100))
     return G
 
 

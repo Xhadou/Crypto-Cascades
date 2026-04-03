@@ -10,7 +10,7 @@ from the ORBITAAL dataset.
 
 import pandas as pd
 import numpy as np
-import networkx as nx
+import igraph as ig
 from enum import Enum
 from typing import Dict, List, Tuple, Optional, Set
 from datetime import datetime, timedelta
@@ -20,6 +20,7 @@ import logging
 from tqdm import tqdm
 
 from src.utils.logger import get_logger
+from src.utils.graph_adapter import name_to_idx
 
 
 class State(Enum):
@@ -266,29 +267,29 @@ class StateAssigner:
         
     def assign_states_at_time(
         self,
-        G: nx.Graph,
+        g: ig.Graph,
         flows: pd.DataFrame,
         current_time: datetime,
         previous_states: Optional[Dict[int, State]] = None
     ) -> Dict[int, State]:
         """
         Assign states to all wallets at a specific time.
-        
+
         Args:
-            G: Transaction graph (for neighbor lookup)
+            g: Transaction graph (igraph, for neighbor lookup)
             flows: Wallet flow DataFrame
             current_time: Current timestamp
             previous_states: States from previous timestep
-            
+
         Returns:
             Dict mapping wallet_id to State
         """
         if previous_states is None:
             previous_states = {}
-            
+
         current_date = current_time.date() if isinstance(current_time, datetime) else current_time
         states = {}
-        
+
         # Precompute flows for efficiency
         window_start = current_date - timedelta(days=self.susceptible_window.days)
         recent_flows = flows[
@@ -305,8 +306,12 @@ class StateAssigner:
         wallet_mean_dict = wallet_stats['mean'].to_dict()
         wallet_std_dict = wallet_stats['std'].to_dict()
 
-        # Get all wallets
-        all_wallets = set(G.nodes())
+        # Get all wallets (wallet IDs stored in vs['name'])
+        all_wallets = set(g.vs['name'])
+
+        # Build name-to-index mapping once for neighbor lookups
+        n2i = name_to_idx(g)
+        names = g.vs['name']
 
         # Identify currently infected wallets for exposure check
         infected_wallets = {
@@ -320,20 +325,21 @@ class StateAssigner:
             wallet_mean = wallet_mean_dict.get(wallet, 0.0)
             wallet_std = wallet_std_dict.get(wallet, 0.0)
             is_buying = self._is_buying_zscore(net_flow, wallet_mean, wallet_std)
-            
+
             # State transition logic
             new_state = self._compute_new_state(
-                wallet, prev_state, is_buying, G, 
-                infected_wallets, current_time
+                wallet, prev_state, is_buying, g,
+                infected_wallets, current_time,
+                n2i=n2i, names=names
             )
-            
+
             states[wallet] = new_state
-            
+
             # Record transition if state changed
             if wallet not in self.state_history or \
                (self.state_history[wallet] and self.state_history[wallet][-1][1] != new_state):
                 self.state_history[wallet].append((current_time, new_state))
-                
+
         return states
     
     def _compute_new_state(
@@ -341,9 +347,11 @@ class StateAssigner:
         wallet: int,
         prev_state: State,
         is_buying: bool,
-        G: nx.Graph,
+        g: ig.Graph,
         infected_wallets: Set[int],
-        current_time: datetime
+        current_time: datetime,
+        n2i: Optional[Dict[int, int]] = None,
+        names: Optional[list] = None,
     ) -> State:
         """Compute new state for a wallet based on transition rules."""
 
@@ -407,12 +415,20 @@ class StateAssigner:
             else:
                 has_infected_neighbor = False
                 try:
-                    neighbors = set(G.neighbors(wallet))
-                    if G.is_directed():
+                    # Build mapping lazily if not provided
+                    if n2i is None:
+                        n2i = name_to_idx(g)
+                    if names is None:
+                        names = g.vs['name']
+
+                    wallet_idx = n2i[wallet]
+                    neighbor_indices = g.neighbors(wallet_idx)
+                    if g.is_directed():
                         # For directed graph, also check predecessors (incoming edges)
-                        neighbors.update(G.predecessors(wallet))  # type: ignore[union-attr]
-                    has_infected_neighbor = bool(neighbors & infected_wallets)
-                except (nx.NetworkXError, KeyError, ValueError):
+                        neighbor_indices = list(set(neighbor_indices) | set(g.neighbors(wallet_idx, mode='in')))
+                    neighbor_names = {names[i] for i in neighbor_indices}
+                    has_infected_neighbor = bool(neighbor_names & infected_wallets)
+                except (ig.InternalError, KeyError, ValueError):
                     pass
 
                 if has_infected_neighbor:
@@ -438,31 +454,31 @@ class StateAssigner:
         
     def run_state_assignment(
         self,
-        G: nx.Graph,
+        g: ig.Graph,
         flows: pd.DataFrame,
         initial_infected: Optional[List[int]] = None,
         initial_infected_fraction: float = 0.01
     ) -> pd.DataFrame:
         """
         Run state assignment over all time periods.
-        
+
         Args:
-            G: Transaction graph
+            g: Transaction graph (igraph)
             flows: Wallet flow DataFrame with date column
             initial_infected: List of initially infected wallets
             initial_infected_fraction: Fraction of wallets to initially infect if not specified
-            
+
         Returns:
             DataFrame with state counts over time
         """
         self.reset()
-        
+
         # Get unique dates
         dates = sorted(flows['date'].unique())
         self.logger.info(f"Running state assignment over {len(dates)} time periods...")
-        
-        # Initialize states
-        all_wallets = list(G.nodes())
+
+        # Initialize states — wallet IDs are stored in vs['name']
+        all_wallets = list(g.vs['name'])
         
         if initial_infected is None:
             # Select top buyers as initial infected
@@ -493,7 +509,7 @@ class StateAssigner:
             
             # Assign states
             current_states = self.assign_states_at_time(
-                G, flows, current_time, current_states
+                g, flows, current_time, current_states
             )
             
             # Count states
@@ -587,22 +603,22 @@ class StateAssigner:
     
     def compute_individual_r(
         self,
-        G: nx.Graph
+        g: ig.Graph
     ) -> Dict[int, int]:
         """
         Compute individual reproduction number (secondary infections caused).
-        
+
         For each infected node, count how many of its neighbors
         became infected after it.
-        
+
         Args:
-            G: Transaction graph
-            
+            g: Transaction graph (igraph)
+
         Returns:
             Dict mapping wallet_id to count of secondary infections
         """
         individual_r = defaultdict(int)
-        
+
         # Build infection timeline
         infection_order = []
         for wallet, history in self.state_history.items():
@@ -610,25 +626,30 @@ class StateAssigner:
                 if state == State.INFECTED:
                     infection_order.append((time, wallet))
                     break
-        
+
         infection_order.sort(key=lambda x: x[0])
         infection_times_sorted = {w: t for t, w in infection_order}
-        
+
+        n2i = name_to_idx(g)
+        names = g.vs['name']
+
         # For each infected wallet, count neighbors infected after
         for wallet, infection_time in infection_times_sorted.items():
             try:
-                neighbors = set(G.neighbors(wallet))
-                if G.is_directed():
-                    neighbors.update(G.predecessors(wallet))  # type: ignore[union-attr]
-            except (nx.NetworkXError, KeyError, ValueError):
+                wallet_idx = n2i[wallet]
+                neighbor_indices = g.neighbors(wallet_idx)
+                if g.is_directed():
+                    neighbor_indices = list(set(neighbor_indices) | set(g.neighbors(wallet_idx, mode='in')))
+                neighbor_names = [names[i] for i in neighbor_indices]
+            except (ig.InternalError, KeyError, ValueError):
                 continue
-                
-            for neighbor in neighbors:
+
+            for neighbor in neighbor_names:
                 if neighbor in infection_times_sorted:
                     neighbor_time = infection_times_sorted[neighbor]
                     if neighbor_time > infection_time:
                         individual_r[wallet] += 1
-        
+
         return dict(individual_r)
     
     def get_normalized_state_counts(
@@ -676,7 +697,7 @@ def main():
         
         # Build graph
         G = builder.build_transaction_graph(df)
-        print(f"Graph: {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges")
+        print(f"Graph: {G.vcount():,} nodes, {G.ecount():,} edges")
         
         # Compute flows
         flows = assigner.compute_wallet_flows(df)

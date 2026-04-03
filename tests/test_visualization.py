@@ -10,7 +10,7 @@ Basic tests to ensure visualization functions:
 import pytest
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 import random
 import tempfile
 from pathlib import Path
@@ -59,7 +59,9 @@ def sample_fgi():
 @pytest.fixture
 def sample_graph():
     """Create a small test graph."""
-    return nx.barabasi_albert_graph(100, 3, seed=42)
+    g = ig.Graph.Barabasi(100, 3)
+    g.vs['name'] = list(range(g.vcount()))
+    return g
 
 
 @pytest.fixture
@@ -69,7 +71,7 @@ def sample_node_states(sample_graph):
     probs = [0.6, 0.1, 0.2, 0.1]
     states = {}
     random.seed(42)
-    for node in sample_graph.nodes():
+    for node in sample_graph.vs['name']:
         states[node] = random.choices(all_states, weights=probs, k=1)[0]
     return states
 

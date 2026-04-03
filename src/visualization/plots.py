@@ -14,7 +14,7 @@ import math
 
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap
@@ -27,6 +27,7 @@ from src.state_engine.state_assigner import State
 from src.estimation.estimator import EstimationResult
 from src.hypothesis.hypothesis_tester import HypothesisResult
 from src.utils.logger import get_logger
+from src.utils.graph_adapter import to_networkx
 from src.visualization.publication_style import apply_style
 
 
@@ -224,7 +225,7 @@ class SEIRVisualizer:
     
     def plot_network_states(
         self,
-        G: nx.Graph,
+        G: ig.Graph,
         node_states: Dict[int, State],
         title: str = "Network FOMO State",
         pos: Optional[Dict] = None,
@@ -233,48 +234,53 @@ class SEIRVisualizer:
     ) -> Figure:
         """
         Visualize network with nodes colored by SEIR state.
-        
+
         Args:
-            G: NetworkX graph
+            G: igraph Graph
             node_states: Mapping of node -> State
             title: Plot title
             pos: Node positions (computed if None)
             node_size_attr: Node attribute to use for sizing
             save_path: Path to save figure
-            
+
         Returns:
             matplotlib Figure
         """
+        import networkx as nx  # lazy import for layout/drawing only
+
         fig, ax = plt.subplots(figsize=(12, 12))
-        
+
+        # Convert to NetworkX for layout and drawing (small subgraphs only)
+        nx_graph = to_networkx(G)
+
         # Compute layout if not provided
         if pos is None:
             self.logger.info("Computing network layout...")
-            if G.number_of_nodes() > 1000:
+            if nx_graph.number_of_nodes() > 1000:
                 # Use faster layout for large graphs
-                pos = nx.spring_layout(G, k=0.5, iterations=50, seed=42)
+                pos = nx.spring_layout(nx_graph, k=0.5, iterations=50, seed=42)
             else:
-                pos = nx.spring_layout(G, seed=42)
-        
+                pos = nx.spring_layout(nx_graph, seed=42)
+
         # Node colors based on state
         node_colors = []
-        for node in G.nodes():
+        for node in nx_graph.nodes():
             state = node_states.get(node, State.SUSCEPTIBLE)
             node_colors.append(STATE_COLORS.get(state.value, '#999999'))
-        
+
         # Node sizes
-        if node_size_attr and node_size_attr in nx.get_node_attributes(G, node_size_attr):
-            sizes = [G.nodes[n].get(node_size_attr, 20) * 50 for n in G.nodes()]
+        if node_size_attr and node_size_attr in nx.get_node_attributes(nx_graph, node_size_attr):
+            sizes = [nx_graph.nodes[n].get(node_size_attr, 20) * 50 for n in nx_graph.nodes()]
         else:
-            degree_view = G.degree()  # type: ignore[operator]
+            degree_view = nx_graph.degree()  # type: ignore[operator]
             degrees = dict(degree_view)
             max_deg = max(degrees.values()) if degrees else 1
-            sizes = [20 + 100 * degrees[n] / max_deg for n in G.nodes()]
-        
+            sizes = [20 + 100 * degrees[n] / max_deg for n in nx_graph.nodes()]
+
         # Draw network
-        nx.draw_networkx_edges(G, pos, alpha=0.2, edge_color='gray', ax=ax)
+        nx.draw_networkx_edges(nx_graph, pos, alpha=0.2, edge_color='gray', ax=ax)
         nx.draw_networkx_nodes(
-            G, pos, node_color=node_colors, node_size=sizes, alpha=0.8, ax=ax
+            nx_graph, pos, node_color=node_colors, node_size=sizes, alpha=0.8, ax=ax
         )
         
         # Legend
@@ -582,7 +588,7 @@ class SEIRVisualizer:
     def create_summary_dashboard(
         self,
         seir_results: pd.DataFrame,
-        G: nx.Graph,
+        G: ig.Graph,
         node_states: Dict[int, State],
         hypothesis_results: Dict[str, HypothesisResult],
         estimated_params: EstimationResult,
@@ -591,16 +597,16 @@ class SEIRVisualizer:
     ) -> Figure:
         """
         Create a comprehensive dashboard with all key visualizations.
-        
+
         Args:
             seir_results: SEIR simulation results
-            G: Network graph
+            G: igraph Graph
             node_states: Current node states
             hypothesis_results: Hypothesis test results
             estimated_params: Estimated parameters
             fgi_values: Fear & Greed Index values
             save_path: Path to save figure
-            
+
         Returns:
             matplotlib Figure
         """
@@ -675,7 +681,7 @@ class SEIRVisualizer:
         
         # 5. Network degree distribution (middle right)
         ax5 = fig.add_subplot(gs[1, 2])
-        degrees = [d for _, d in G.degree()]  # type: ignore[misc]
+        degrees = G.degree()
         ax5.hist(degrees, bins=50, color='steelblue', alpha=0.7, edgecolor='black')
         ax5.set_xlabel('Degree')
         ax5.set_ylabel('Frequency')
@@ -706,8 +712,8 @@ class SEIRVisualizer:
         summary_text = [
             "SUMMARY STATISTICS",
             "-" * 30,
-            f"Network nodes: {G.number_of_nodes():,}",
-            f"Network edges: {G.number_of_edges():,}",
+            f"Network nodes: {G.vcount():,}",
+            f"Network edges: {G.ecount():,}",
             f"Mean degree: {np.mean(degrees):.2f}",
             "",
             f"Basic R₀: {estimated_params.r0():.3f}",
@@ -1088,7 +1094,7 @@ class SEIRVisualizer:
 
 def main():
     """Test visualization module."""
-    import networkx as nx
+    import igraph as ig
     
     print("Testing visualization module...")
     

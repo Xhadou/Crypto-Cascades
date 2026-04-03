@@ -7,7 +7,7 @@ Tests the complete data flow from raw data to hypothesis testing results.
 import pytest
 import numpy as np
 import pandas as pd
-import networkx as nx
+import igraph as ig
 from pathlib import Path
 import tempfile
 import os
@@ -71,9 +71,9 @@ class TestEndToEndPipeline:
             aggregate_multi_edges=True
         )
         
-        assert isinstance(G, nx.Graph)
-        assert G.number_of_nodes() > 0
-        assert G.number_of_edges() > 0
+        assert isinstance(G, ig.Graph)
+        assert G.vcount() > 0
+        assert G.ecount() > 0
     
     def test_network_analysis_pipeline(self, synthetic_transactions):
         """Test network analysis from transactions."""
@@ -82,15 +82,15 @@ class TestEndToEndPipeline:
         G = builder.build_transaction_graph(synthetic_transactions, directed=False)
         
         # Verify graph was built
-        assert G.number_of_nodes() > 0
-        assert G.number_of_edges() > 0
+        assert G.vcount() > 0
+        assert G.ecount() > 0
         
         # Compute centrality metrics
         metrics = NetworkMetrics()
         centrality = metrics.compute_centrality_measures(G, measures=['degree'])
         
         assert 'degree' in centrality
-        assert len(centrality['degree']) == G.number_of_nodes()
+        assert len(centrality['degree']) == G.vcount()
         
         # Community detection
         detector = CommunityDetector()
@@ -110,7 +110,7 @@ class TestEndToEndPipeline:
         model = NetworkSEIR(params, random_seed=42)
         
         # Run mean-field simulation
-        N = G.number_of_nodes()
+        N = G.vcount()
         results = model.simulate_meanfield(
             N=N,
             initial_infected=max(1, int(N * 0.01)),
@@ -154,7 +154,7 @@ class TestEndToEndPipeline:
         model = NetworkSEIR(params, random_seed=42)
         
         sim_data = model.simulate_meanfield(
-            N=G.number_of_nodes(),
+            N=G.vcount(),
             initial_infected=10,
             t_max=100,
             fgi_values=synthetic_fgi[:100]
@@ -162,7 +162,7 @@ class TestEndToEndPipeline:
         
         # Estimate parameters
         estimator = ParameterEstimator(method='lsq')
-        est_result = estimator.estimate(sim_data, N=G.number_of_nodes(), n_bootstrap=0)
+        est_result = estimator.estimate(sim_data, N=G.vcount(), n_bootstrap=0)
         
         # Run hypothesis tests
         tester = HypothesisTester(alpha=0.05, random_seed=42)
@@ -183,7 +183,7 @@ class TestEndToEndPipeline:
         model = NetworkSEIR(params, random_seed=42)
         
         sim_data = model.simulate_meanfield(
-            N=G.number_of_nodes(),
+            N=G.vcount(),
             initial_infected=10,
             t_max=100,
             fgi_values=synthetic_fgi[:100]
@@ -191,7 +191,7 @@ class TestEndToEndPipeline:
         
         # Estimate parameters
         estimator = ParameterEstimator(method='lsq')
-        est_result = estimator.estimate(sim_data, N=G.number_of_nodes(), n_bootstrap=0)
+        est_result = estimator.estimate(sim_data, N=G.vcount(), n_bootstrap=0)
         
         # Test all hypotheses
         tester = HypothesisTester(alpha=0.05, random_seed=42)
@@ -259,18 +259,19 @@ class TestEdgeCases:
     
     def test_empty_graph(self):
         """Test handling of empty graph."""
-        G = nx.Graph()
-        
+        G = ig.Graph(directed=False)
+        G.vs['name'] = []
+
         params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
         model = NetworkSEIR(params)
-        
+
         r0 = model.compute_network_r0(G)
         assert r0 == 0
-    
+
     def test_single_node_graph(self):
         """Test with single node graph."""
-        G = nx.Graph()
-        G.add_node(0)
+        G = ig.Graph(n=1, directed=False)
+        G.vs['name'] = [0]
         
         params = SEIRParameters(beta=0.3, sigma=0.2, gamma=0.1)
         model = NetworkSEIR(params)
