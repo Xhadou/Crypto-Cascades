@@ -1490,13 +1490,16 @@ class CryptoCascadesPipeline:
             original_output_dir = self.output_dir
             self.output_dir = period_output_dir
 
-            # Clear per-phase checkpoints so each period gets fresh computation
+            # Each period has its own checkpoint dir. Only invalidate if
+            # no checkpoints exist yet (fresh start). On resume, existing
+            # checkpoints (graph, clustering, communities) are preserved.
             from src.utils.checkpoint import CheckpointManager
             cp = CheckpointManager(
                 self.output_dir / 'checkpoints',
                 Path('configs/config.yaml'),
             )
-            cp.invalidate()
+            if not cp.has('graph'):
+                cp.invalidate()
 
             # Reset in-memory state for this period
             self._graph = None
