@@ -126,7 +126,10 @@ class CommunityDetector:
             )
             return self.detect_communities_louvain(g, resolution, random_state)
 
-        self.logger.info("Detecting communities using Leiden algorithm...")
+        self.logger.info(
+            f"Detecting communities using Leiden algorithm "
+            f"({g.vcount():,} nodes, {g.ecount():,} edges) — this may take hours for large graphs..."
+        )
 
         g_u = self._ensure_undirected(g)
 

@@ -351,7 +351,8 @@ class ParameterEstimator:
             block_length, np.arange(t_max), seed=self.random_seed
         )
 
-        for pos_data, _ in bs.bootstrap(n_bootstrap):
+        from tqdm import tqdm
+        for pos_data, _ in tqdm(bs.bootstrap(n_bootstrap), desc="Bootstrap CI", total=n_bootstrap, unit="sample"):
             data = pos_data[0]
             indices = np.sort(data.astype(int).flatten())
             # Clip to valid range

@@ -178,7 +178,7 @@ class NetworkSEIR:
         Returns:
             DataFrame with columns [t, S, E, I, R] and fractions
         """
-        self.logger.info(f"Running mean-field SEIR simulation (N={N:,}, T={t_max})")
+        self.logger.debug(f"Running mean-field SEIR simulation (N={N:,}, T={t_max})")
         
         # Initial conditions
         I0 = initial_infected
@@ -266,7 +266,7 @@ class NetworkSEIR:
             DataFrame with state counts over time
         """
         N = G.vcount()
-        self.logger.info(
+        self.logger.debug(
             f"Running stochastic network SEIR simulation "
             f"(N={N:,}, T={t_max})"
         )
@@ -748,7 +748,7 @@ class NetworkSEIR:
         # graph object (see run_monte_carlo), otherwise build it once.
         neighbors = getattr(G, '_cached_neighbors', None)
         if neighbors is None:
-            self.logger.info("  Building neighbor lookup table...")
+            self.logger.debug("  Building neighbor lookup table...")
             neighbors = {v: G.neighbors(v) for v in range(N)}
 
         # Track nodes in each state for efficient rate calculation
@@ -939,7 +939,7 @@ class NetworkSEIR:
         # so simulate_network_stochastic reuses it across all runs
         # instead of rebuilding a 30M-entry dict each time.
         if not hasattr(G, '_cached_neighbors'):
-            self.logger.info("  Pre-building neighbor lookup (once)...")
+            self.logger.debug("  Pre-building neighbor lookup (once)...")
             G._cached_neighbors = {
                 v: G.neighbors(v) for v in range(G.vcount())
             }
@@ -949,7 +949,8 @@ class NetworkSEIR:
         ss = SeedSequence(self.random_seed)
         child_seeds = ss.spawn(n_simulations)
 
-        for i in range(n_simulations):
+        from tqdm import tqdm
+        for i in tqdm(range(n_simulations), desc="Monte Carlo", unit="sim"):
             # Each run gets its own RNG from a spawned seed
             run_rng = np.random.default_rng(child_seeds[i])
             initial_infected = run_rng.choice(

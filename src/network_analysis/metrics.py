@@ -119,7 +119,7 @@ class NetworkMetrics:
 
         # Degree centrality (fast)
         if 'degree' in measures:
-            self.logger.info("  Computing degree centrality...")
+            self.logger.debug("  Computing degree centrality...")
             if g.is_directed():
                 in_deg = g.indegree()
                 out_deg = g.outdegree()
@@ -168,7 +168,7 @@ class NetworkMetrics:
                         f"Computing with igraph (no sampling available)."
                     )
 
-                self.logger.info("  Computing betweenness centrality...")
+                self.logger.debug("  Computing betweenness centrality...")
                 try:
                     bc = g.betweenness()
                     # igraph betweenness is not normalized by default; normalize
@@ -194,7 +194,7 @@ class NetworkMetrics:
                     f"Closeness centrality on {n_nodes:,} nodes is expensive. Skipping."
                 )
             else:
-                self.logger.info("  Computing closeness centrality...")
+                self.logger.debug("  Computing closeness centrality...")
                 try:
                     cc = g.closeness()
                     results['closeness'] = {names[i]: v for i, v in enumerate(cc)}
@@ -209,7 +209,7 @@ class NetworkMetrics:
                     f"expensive (power iteration scales poorly). Skipping."
                 )
             else:
-                self.logger.info("  Computing eigenvector centrality...")
+                self.logger.debug("  Computing eigenvector centrality...")
                 try:
                     ec = g.eigenvector_centrality()
                     results['eigenvector'] = {names[i]: v for i, v in enumerate(ec)}

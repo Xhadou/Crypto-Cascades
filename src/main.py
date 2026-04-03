@@ -328,7 +328,15 @@ class CryptoCascadesPipeline:
                 schema = None
 
                 try:
-                    for batch_start in range(0, len(matched_files), BATCH_SIZE):
+                    from tqdm import tqdm
+                    n_batches = (len(matched_files) + BATCH_SIZE - 1) // BATCH_SIZE
+                    pbar = tqdm(
+                        range(0, len(matched_files), BATCH_SIZE),
+                        desc="Loading parquet files",
+                        unit="batch",
+                        total=n_batches,
+                    )
+                    for batch_start in pbar:
                         batch = matched_files[batch_start:batch_start + BATCH_SIZE]
                         dfs = []
                         for pq_file, file_date in batch:
@@ -355,10 +363,7 @@ class CryptoCascadesPipeline:
                             del dfs, chunk, table
 
                         import gc; gc.collect()
-                        self.logger.info(
-                            f"  Processed {min(batch_start + BATCH_SIZE, len(matched_files))}"
-                            f"/{len(matched_files)} files ({total_edges:,} edges)"
-                        )
+                        pbar.set_postfix(edges=f"{total_edges:,}")
                 finally:
                     if writer is not None:
                         writer.close()
@@ -529,7 +534,9 @@ class CryptoCascadesPipeline:
                     # for ~100M unique edges).
                     edge_data: dict = {}  # (src, tgt) -> [weight, btc, count]
 
-                    for i in range(n_groups):
+                    from tqdm import tqdm
+                    pbar = tqdm(range(n_groups), desc="Building graph", unit="chunk")
+                    for i in pbar:
                         chunk = pf.read_row_group(
                             i, columns=['source_id', 'target_id', 'btc_value', 'usd_value']
                         ).to_pandas()
@@ -551,12 +558,7 @@ class CryptoCascadesPipeline:
 
                         del chunk, src, tgt, usd, btc
                         gc.collect()
-
-                        if (i + 1) % 50 == 0 or i == n_groups - 1:
-                            self.logger.info(
-                                f"  Row group {i+1}/{n_groups} — "
-                                f"{len(edge_data):,} unique edges so far"
-                            )
+                        pbar.set_postfix(edges=f"{len(edge_data):,}")
 
                     self.logger.info(
                         f"Aggregated to {len(edge_data):,} unique edges. "

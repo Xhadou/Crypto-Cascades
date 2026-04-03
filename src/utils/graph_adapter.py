@@ -77,7 +77,7 @@ def build_igraph_from_df(
     # Cache the reverse mapping on the graph object.
     g["_name_to_idx"] = name_to_idx_map
 
-    logger.info(
+    logger.debug(
         "Built igraph (%s): %s nodes, %s edges",
         "directed" if directed else "undirected",
         f"{g.vcount():,}",
@@ -133,7 +133,7 @@ def build_igraph_from_edges(
 
     g["_name_to_idx"] = name_to_idx_map
 
-    logger.info(
+    logger.debug(
         "Built igraph from edge dict (%s): %s nodes, %s edges",
         "directed" if directed else "undirected",
         f"{g.vcount():,}",

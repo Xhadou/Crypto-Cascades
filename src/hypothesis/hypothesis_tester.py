@@ -679,7 +679,8 @@ class HypothesisTester:
 
         null_r0s: Dict[str, List[float]] = {nt: [] for nt in null_types}
 
-        for i in range(n_null_networks):
+        from tqdm import tqdm
+        for i in tqdm(range(n_null_networks), desc="H2 null models", unit="model"):
             seed = self.random_seed + i
 
             if 'erdos_renyi' in null_types:
@@ -1350,7 +1351,7 @@ class HypothesisTester:
         partition_values = list(partition.values())
         partition_keys = list(partition.keys())
         rng = np.random.default_rng(self.random_seed if hasattr(self, 'random_seed') else 42)
-        for _ in range(n_permutations):
+        for _ in tqdm(range(n_permutations), desc="H5 permutations", unit="perm"):
             shuffled_values = partition_values.copy()
             rng.shuffle(shuffled_values)
             shuffled_partition = dict(zip(partition_keys, shuffled_values))

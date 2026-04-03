@@ -149,7 +149,7 @@ class CheckpointManager:
 
         self._manifest.setdefault('steps', {})[step] = entry
         self._save_manifest()
-        self.logger.info(f"Checkpoint saved: {step} → {fname}")
+        self.logger.debug(f"Checkpoint saved: {step} → {fname}")
 
     def load(self, step: str) -> Any:
         """Load checkpoint data for *step*."""
