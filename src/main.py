@@ -367,12 +367,13 @@ class CryptoCascadesPipeline:
                     f"Written {total_edges:,} edges to {output_file}"
                 )
 
-                # Don't reload the full parquet here — it may exceed
-                # available RAM (858M rows ≈ 8-10 GB).  The analyze
-                # phase loads it on demand from the saved file.
+                # Reload the parquet for downstream use (graph build,
+                # state assignment).  Per-period files are ~100M rows
+                # (~1-2 GB) which fits in RAM.
+                self._transactions = pd.read_parquet(output_file)
                 self.logger.info(
-                    f"Preprocessing complete. {total_edges:,} transactions "
-                    f"saved to {output_file}"
+                    f"Preprocessing complete. Loaded {len(self._transactions):,} "
+                    f"transactions from {output_file}"
                 )
             else:
                 self.logger.warning("No parquet files matched date range. Using sample data.")
@@ -1571,10 +1572,13 @@ class CryptoCascadesPipeline:
             for name, res in period_results.items() if name != 'h6_test'
         }
         
-        viz.plot_r0_comparison_by_period(
-            viz_data,
-            save_path=str(self.output_dir / 'figures' / 'r0_comparison_periods.png')
-        )
+        if not viz_data:
+            self.logger.warning("No period results available for R₀ comparison plot")
+        else:
+            viz.plot_r0_comparison_by_period(
+                viz_data,
+                save_path=str(self.output_dir / 'figures' / 'r0_comparison_periods.png')
+            )
         
         # Save summary results
         summary_df = pd.DataFrame([
