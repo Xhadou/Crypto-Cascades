@@ -1459,6 +1459,12 @@ class CryptoCascadesPipeline:
                 period_results = {}
 
         for period_name, period_config in time_windows.items():
+            # Skip dev/sanity-check periods — only run bull/bear
+            period_type = period_config.get('type', 'unknown')
+            if period_type == 'dev':
+                self.logger.info(f"Skipping development period: {period_name}")
+                continue
+
             # Skip already-completed periods
             if period_name in period_results:
                 self.logger.info(f"Skipping already-completed period: {period_name}")
@@ -1466,10 +1472,21 @@ class CryptoCascadesPipeline:
 
             self.logger.info("-" * 40)
             self.logger.info(f"Analyzing period: {period_name.upper()}")
-            self.logger.info(f"  Type: {period_config.get('type', 'unknown')}")
+            self.logger.info(f"  Type: {period_type}")
             self.logger.info(f"  Start: {period_config.get('start')}")
             self.logger.info(f"  End: {period_config.get('end')}")
             self.logger.info("-" * 40)
+
+            # Create per-period output directory so files don't overwrite
+            period_output_dir = self.output_dir / 'periods' / period_name
+            period_output_dir.mkdir(parents=True, exist_ok=True)
+            (period_output_dir / 'data').mkdir(exist_ok=True)
+            (period_output_dir / 'reports').mkdir(exist_ok=True)
+            (period_output_dir / 'figures').mkdir(exist_ok=True)
+
+            # Temporarily redirect output_dir to per-period directory
+            original_output_dir = self.output_dir
+            self.output_dir = period_output_dir
 
             # Clear per-phase checkpoints so each period gets fresh computation
             from src.utils.checkpoint import CheckpointManager
@@ -1499,10 +1516,12 @@ class CryptoCascadesPipeline:
             except Exception as e:
                 self.logger.error(f"Period {period_name} failed: {e}")
                 self.logger.info("Previously completed periods are preserved")
+                self.output_dir = original_output_dir
                 continue
 
             if self._estimated_params is None or self._seir_results is None:
                 self.logger.warning(f"Skipping period {period_name} due to missing results")
+                self.output_dir = original_output_dir
                 continue
 
             # Run per-period hypothesis tests
@@ -1532,6 +1551,9 @@ class CryptoCascadesPipeline:
                 r0_bear_market = r0_value
 
             self.logger.info(f"  R₀ = {r0_value:.3f} [{r0_ci[0]:.3f}, {r0_ci[1]:.3f}]")
+
+            # Restore output_dir before saving cross-period results
+            self.output_dir = original_output_dir
 
             # Save period results after each period completes
             import pickle
