@@ -506,58 +506,73 @@ class CryptoCascadesPipeline:
                 processed_file = self.output_dir / 'data' / 'processed_transactions.parquet'
                 if processed_file.exists():
                     self.logger.info(f"Loading preprocessed data from {processed_file}")
-                    # Stream parquet in chunks to aggregate edges without
-                    # loading all 858M rows at once (~8-10 GB).
+                    # Build graph directly from parquet chunks.  Each row
+                    # group is read, aggregated, and merged into the graph
+                    # incrementally.  Peak memory = graph + one chunk.
                     import pyarrow.parquet as pq
+
                     pf = pq.ParquetFile(str(processed_file))
+                    n_groups = pf.metadata.num_row_groups
                     total_rows = pf.metadata.num_rows
-                    self.logger.info(f"Parquet has {total_rows:,} rows in {pf.metadata.num_row_groups} row groups")
-
-                    # Accumulate edge aggregates chunk by chunk
-                    agg_frames = []
-                    for i in range(pf.metadata.num_row_groups):
-                        chunk = pf.read_row_group(i).to_pandas()
-                        # Aggregate within chunk
-                        grouped = chunk.groupby(['source_id', 'target_id']).agg(
-                            btc_value=('btc_value', 'sum'),
-                            usd_value=('usd_value', 'sum'),
-                            count=('btc_value', 'count'),
-                        ).reset_index()
-                        agg_frames.append(grouped)
-                        del chunk
-                        gc.collect()
-                        self.logger.info(f"  Aggregated row group {i+1}/{pf.metadata.num_row_groups}")
-
-                    # Final aggregation across chunks
-                    self.logger.info("Merging aggregated chunks...")
-                    all_agg = pd.concat(agg_frames, ignore_index=True)
-                    del agg_frames
-                    gc.collect()
-
-                    final_agg = all_agg.groupby(['source_id', 'target_id']).agg(
-                        btc_value=('btc_value', 'sum'),
-                        usd_value=('usd_value', 'sum'),
-                        count=('count', 'sum'),
-                    ).reset_index()
-                    del all_agg
-                    gc.collect()
-
-                    self.logger.info(f"Aggregated to {len(final_agg):,} unique edges")
-
-                    # Build graph from pre-aggregated edges
-                    builder = GraphBuilder()
-                    self._graph = builder.build_transaction_graph(
-                        final_agg,
-                        directed=False,
-                        weight_column='usd_value',
-                        aggregate_multi_edges=False,  # already aggregated
+                    self.logger.info(
+                        f"Parquet has {total_rows:,} rows in {n_groups} row groups"
                     )
-                    del final_agg
+
+                    # Two-pass approach:
+                    # Pass 1: collect all unique (source, target) pairs
+                    #          with accumulated weights using a dict.
+                    # Pass 2: build NetworkX graph from the dict.
+                    # This avoids both the huge concat+groupby AND slow
+                    # iterrows, at the cost of one Python dict (~4-6 GB
+                    # for ~100M unique edges).
+                    edge_data: dict = {}  # (src, tgt) -> [weight, btc, count]
+
+                    for i in range(n_groups):
+                        chunk = pf.read_row_group(
+                            i, columns=['source_id', 'target_id', 'btc_value', 'usd_value']
+                        ).to_pandas()
+
+                        src = chunk['source_id'].values
+                        tgt = chunk['target_id'].values
+                        usd = chunk['usd_value'].values
+                        btc = chunk['btc_value'].values
+
+                        for j in range(len(chunk)):
+                            key = (src[j], tgt[j])
+                            if key in edge_data:
+                                d = edge_data[key]
+                                d[0] += usd[j]
+                                d[1] += btc[j]
+                                d[2] += 1
+                            else:
+                                edge_data[key] = [usd[j], btc[j], 1]
+
+                        del chunk, src, tgt, usd, btc
+                        gc.collect()
+
+                        if (i + 1) % 50 == 0 or i == n_groups - 1:
+                            self.logger.info(
+                                f"  Row group {i+1}/{n_groups} — "
+                                f"{len(edge_data):,} unique edges so far"
+                            )
+
+                    self.logger.info(
+                        f"Aggregated to {len(edge_data):,} unique edges. "
+                        f"Building graph..."
+                    )
+
+                    self._graph = nx.Graph()
+                    self._graph.add_edges_from(
+                        (src, tgt, {'weight': d[0], 'btc_value': d[1], 'count': d[2]})
+                        for (src, tgt), d in edge_data.items()
+                    )
+                    del edge_data
                     gc.collect()
 
                     self.logger.info(
                         f"Built graph: {self._graph.number_of_nodes():,} nodes, "
-                        f"{self._graph.number_of_edges():,} edges"
+                        f"{self._graph.number_of_edges():,} edges "
+                        f"(from {total_edges_added:,} aggregated edge records)"
                     )
                 else:
                     self.run_preprocess()
