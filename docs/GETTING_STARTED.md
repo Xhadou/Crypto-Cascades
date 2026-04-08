@@ -141,9 +141,9 @@ python -m src.main --phase three-period
 | `analyze` | `results/data/` | Centrality scores, community assignments, state assignments, observed curves |
 | `simulate` | `results/data/` | HMF degree-class ODE trajectories |
 | `estimate` | `results/data/` | Fitted parameters (β, σ, γ, ω), R₀ estimates, bootstrap CIs |
-| `test` | `results/reports/` | H1–H5 results: test statistics, p-values, effect sizes |
-| `visualize` | `results/figures/` | SEIR curves, network plots, hypothesis result figures |
-| `three-period` | `results/periods/` | Per-period results, cross-period comparison CSV, H6 results |
+| `test` | `results/reports/` (or `results/periods/*/reports/` in three-period mode) | H1–H5 results: test statistics, p-values, effect sizes |
+| `visualize` | `results/figures/` (or `results/periods/*/figures/`) | SEIR curves, network plots, hypothesis result figures |
+| `three-period` | `results/periods/{training,control,validation}/` | Per-period data/reports/figures, cross-period comparison CSV, H6 results |
 
 ## Understanding the Results
 

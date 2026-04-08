@@ -162,8 +162,12 @@ Crypto-Cascades/
 ├── results/                         # Pipeline outputs (generated, git-ignored)
 │   ├── data/                        # Processed DataFrames, state assignments, observed curves
 │   ├── figures/                     # Generated plots
-│   ├── reports/                     # Analysis reports, hypothesis results
 │   └── periods/                     # Per-period outputs for three-period analysis
+│       └── {training,control,validation}/
+│           ├── data/                # Period-specific processed data
+│           ├── reports/             # Hypothesis & SNAP validation reports
+│           ├── figures/             # Period-specific plots
+│           └── checkpoints/         # Pipeline checkpoint files
 ├── tests/                           # Pytest suite
 ├── docs/                            # Documentation & research report
 ├── pyproject.toml                   # Project metadata, Ruff, pytest config
