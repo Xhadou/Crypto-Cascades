@@ -879,8 +879,8 @@ class SEIRVisualizer:
         
         ax.set_xticks(x_pos)
         ax.set_xticklabels(labels, fontsize=11)
-        ax.set_ylabel('Basic Reproduction Number (R₀)', fontsize=14)
-        ax.set_title('FOMO Contagion R₀ Across Market Conditions', fontsize=16, fontweight='bold')
+        ax.set_ylabel('Basic Reproduction Number ($R_0$)', fontsize=14)
+        ax.set_title('FOMO Contagion $R_0$ Across Market Conditions', fontsize=16, fontweight='bold')
         
         # Add legend for market types
         bull_patch = mpatches.Patch(color='#E94F37', alpha=0.8, label='Bull Market')

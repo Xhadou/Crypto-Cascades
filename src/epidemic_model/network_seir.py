@@ -48,7 +48,7 @@ class SEIRParameters:
     
     def __post_init__(self):
         """Validate parameters."""
-        assert 0 < self.beta <= 1, "beta must be in (0, 1]"
+        assert self.beta > 0, "beta must be positive"
         assert 0 < self.sigma <= 1, "sigma must be in (0, 1]"
         assert 0 < self.gamma <= 1, "gamma must be in (0, 1]"
         assert 0 <= self.omega <= 1, "omega must be in [0, 1]"
@@ -163,27 +163,31 @@ class NetworkSEIR:
         initial_infected: int,
         t_max: int,
         fgi_values: Optional[np.ndarray] = None,
-        dt: float = 1.0
+        dt: float = 1.0,
+        initial_exposed: int = 0,
+        initial_recovered: int = 0,
     ) -> pd.DataFrame:
         """
         Run mean-field (ODE) simulation of SEIR dynamics.
-        
+
         Args:
             N: Total population
             initial_infected: Initial number of infected
             t_max: Maximum time steps
             fgi_values: Fear & Greed Index values (one per timestep)
             dt: Time step
-            
+            initial_exposed: Initial number of exposed (default 0)
+            initial_recovered: Initial number of recovered (default 0)
+
         Returns:
             DataFrame with columns [t, S, E, I, R] and fractions
         """
         self.logger.debug(f"Running mean-field SEIR simulation (N={N:,}, T={t_max})")
-        
+
         # Initial conditions
         I0 = initial_infected
-        E0 = 0
-        R0 = 0
+        E0 = initial_exposed
+        R0 = initial_recovered
         S0 = N - I0 - E0 - R0
         
         # Time points
@@ -245,7 +249,195 @@ class NetworkSEIR:
             })
 
         return pd.DataFrame(results)
-    
+
+    # ------------------------------------------------------------------
+    # Heterogeneous Mean-Field (HMF) simulation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _log_bin_degrees(
+        degree_sequence: np.ndarray, n_bins: int = 30
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Bin degrees logarithmically into ~n_bins classes.
+
+        Returns:
+            k_rep: representative degree for each bin (weighted mean)
+            N_k: number of nodes in each bin
+        """
+        degrees = np.asarray(degree_sequence, dtype=np.float64)
+        k_max = degrees.max()
+
+        # Degree-0 nodes form their own class (isolated, can't be infected
+        # via network edges — they stay susceptible forever in HMF).
+        k_rep_list, nk_list = [], []
+        n_zero = int(np.sum(degrees == 0))
+        if n_zero > 0:
+            k_rep_list.append(0.0)
+            nk_list.append(n_zero)
+
+        pos_degrees = degrees[degrees > 0]
+        if len(pos_degrees) == 0:
+            return np.array(k_rep_list or [0.0]), np.array(nk_list or [len(degrees)])
+
+        k_min = float(pos_degrees.min())
+        if k_max <= k_min:
+            k_rep_list.append(k_min)
+            nk_list.append(len(pos_degrees))
+            return np.array(k_rep_list), np.array(nk_list)
+
+        bin_edges = np.unique(
+            np.floor(np.logspace(np.log10(k_min), np.log10(k_max + 1), n_bins + 1))
+                .astype(np.float64)
+        )
+        for i in range(len(bin_edges) - 1):
+            mask = (degrees >= bin_edges[i]) & (degrees < bin_edges[i + 1])
+            count = int(mask.sum())
+            if count > 0:
+                k_rep_list.append(float(degrees[mask].mean()))
+                nk_list.append(count)
+        # Last edge: include k_max exactly
+        mask = degrees >= bin_edges[-1]
+        if mask.sum() > 0:
+            k_rep_list.append(float(degrees[mask].mean()))
+            nk_list.append(int(mask.sum()))
+
+        return np.array(k_rep_list), np.array(nk_list)
+
+    def simulate_hmf(
+        self,
+        degree_sequence: np.ndarray,
+        initial_infected: int,
+        t_max: int,
+        fgi_values: Optional[np.ndarray] = None,
+        n_bins: int = 30,
+        dt: float = 1.0,
+    ) -> pd.DataFrame:
+        """Heterogeneous Mean-Field (degree-class) SEIR simulation.
+
+        Partitions nodes into logarithmic degree bins and solves coupled
+        ODEs per class.  Naturally incorporates the ⟨k²⟩/⟨k⟩ correction
+        (Pastor-Satorras & Vespignani 2001).  Cost is O(4·B) ODEs where
+        B ≈ 30, running in < 1 second regardless of graph size.
+
+        Args:
+            degree_sequence: Array of node degrees (length N).
+            initial_infected: Total initial infected count.
+            t_max: Number of time steps.
+            fgi_values: Optional FGI array (one value per timestep).
+            n_bins: Number of logarithmic degree bins.
+            dt: Time step size.
+
+        Returns:
+            DataFrame with columns matching ``simulate_meanfield()`` output.
+        """
+        N = len(degree_sequence)
+        k_rep, N_k = self._log_bin_degrees(degree_sequence, n_bins)
+        B = len(k_rep)
+        k_mean = float(np.sum(k_rep * N_k) / N)
+
+        self.logger.debug(
+            f"HMF simulation: {B} degree bins, k_mean={k_mean:.2f}, N={N:,}"
+        )
+
+        # Initial conditions — distribute initial infected into Exposed,
+        # proportionally to degree (higher-degree nodes more likely to have
+        # had contact with an infected source).  Seeding E (not I) lets
+        # the SEIR dynamics propagate naturally through E→I→R.
+        weights = k_rep * N_k.astype(np.float64)
+        w_sum = weights.sum()
+        if w_sum > 0:
+            weights = weights / w_sum
+        else:
+            weights = N_k.astype(np.float64) / max(N_k.sum(), 1)
+        E0_k = weights * initial_infected
+        # Clamp: can't expose more nodes than exist in a class
+        E0_k = np.minimum(E0_k, N_k.astype(np.float64))
+
+        S0_k = N_k.astype(np.float64) - E0_k
+        I0_k = np.zeros(B)
+        R0_k = np.zeros(B)
+
+        y0 = np.concatenate([S0_k, E0_k, I0_k, R0_k])
+
+        # Build ODE
+        def hmf_ode(t_val, y, beta):
+            Sk = y[0:B]
+            Ek = y[B:2*B]
+            Ik = y[2*B:3*B]
+            Rk = y[3*B:4*B]
+
+            # Probability a random edge points to an infected node
+            Theta = np.sum(k_rep * Ik) / (N * k_mean) if k_mean > 0 else 0.0
+            force = k_rep * beta * Theta
+
+            dSk = -force * Sk + self.params.omega * Rk
+            dEk = force * Sk - self.params.sigma * Ek
+            dIk = self.params.sigma * Ek - self.params.gamma * Ik
+            dRk = self.params.gamma * Ik - self.params.omega * Rk
+            return np.concatenate([dSk, dEk, dIk, dRk])
+
+        # Time-varying or constant beta
+        t_eval = np.arange(0, t_max, dt)
+        if fgi_values is not None:
+            def ode_func(t_val, y_val):
+                idx = min(int(t_val), len(fgi_values) - 1)
+                beta_eff = self.params.effective_beta(fgi_values[idx])
+                return hmf_ode(t_val, y_val, beta_eff)
+        else:
+            def ode_func(t_val, y_val):
+                return hmf_ode(t_val, y_val, self.params.beta)
+
+        # Use BDF (stiff solver) — with large network factors (k * β * Θ)
+        # the ODE becomes stiff and RK45 needs millions of micro-steps.
+        # BDF handles stiff systems efficiently with adaptive order.
+        sol = solve_ivp(
+            ode_func,
+            t_span=[t_eval[0], t_eval[-1]],
+            y0=y0,
+            method='BDF',
+            t_eval=t_eval,
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
+        # Aggregate across degree classes
+        results = []
+        for i in range(len(sol.t)):
+            Sk = np.maximum(sol.y[0:B, i], 0)
+            Ek = np.maximum(sol.y[B:2*B, i], 0)
+            Ik = np.maximum(sol.y[2*B:3*B, i], 0)
+            Rk = np.maximum(sol.y[3*B:4*B, i], 0)
+
+            S = float(Sk.sum())
+            E = float(Ek.sum())
+            I = float(Ik.sum())
+            R = float(Rk.sum())
+
+            if fgi_values is not None:
+                idx = min(int(sol.t[i]), len(fgi_values) - 1)
+                beta_eff = self.params.effective_beta(fgi_values[idx])
+            else:
+                beta_eff = self.params.beta
+
+            results.append({
+                't': sol.t[i],
+                'S': S, 'E': E, 'I': I, 'R': R,
+                'S_frac': S / N, 'E_frac': E / N,
+                'I_frac': I / N, 'R_frac': R / N,
+                'beta_eff': beta_eff,
+            })
+
+        return pd.DataFrame(results)
+
+    def compute_network_r0_hmf(self, degree_sequence: np.ndarray) -> float:
+        """Network-corrected R₀ using ⟨k²⟩/⟨k⟩ (HMF approximation)."""
+        deg = np.asarray(degree_sequence, dtype=np.float64)
+        k_mean = deg.mean()
+        k2_mean = (deg ** 2).mean()
+        if k_mean > 0 and self.params.gamma > 0:
+            return float(self.params.beta * k2_mean / (k_mean * self.params.gamma))
+        return self.params.beta / max(self.params.gamma, 1e-10)
+
     def simulate_network_stochastic(
         self,
         G: ig.Graph,

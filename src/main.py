@@ -205,6 +205,7 @@ class CryptoCascadesPipeline:
         self._estimated_params = None
         self._hypothesis_results = None
         self._sensitivity_df = None
+        self._observed_curves = None
         self._community_partition = None
         self._ews_indicators = None
         
@@ -429,9 +430,24 @@ class CryptoCascadesPipeline:
         fgi_file = market_dir / 'fear_greed_index.csv'
         if fgi_file.exists():
             fgi_df = pd.read_csv(fgi_file)
-            self._fgi_values = fgi_df['value'].values
-            self._fgi_is_synthetic = False
-            self.logger.info(f"Loaded {len(self._fgi_values)} FGI values")
+            # Filter FGI by period dates (same as transactions)
+            if start_date or end_date:
+                if 'datetime' in fgi_df.columns:
+                    fgi_df['datetime'] = pd.to_datetime(fgi_df['datetime'])
+                    if start_date:
+                        fgi_df = fgi_df[fgi_df['datetime'] >= pd.to_datetime(start_date)]
+                    if end_date:
+                        fgi_df = fgi_df[fgi_df['datetime'] <= pd.to_datetime(end_date)]
+            if len(fgi_df) >= 10:
+                self._fgi_values = fgi_df['value'].values
+                self._fgi_is_synthetic = False
+                self.logger.info(f"Loaded {len(self._fgi_values)} FGI values")
+            else:
+                self._fgi_values = self.rng.uniform(30, 70, 365)
+                self._fgi_is_synthetic = True
+                self.logger.warning(
+                    f"Only {len(fgi_df)} FGI values in period range — using synthetic"
+                )
         else:
             self._fgi_values = self.rng.uniform(30, 70, 365)
             self._fgi_is_synthetic = True
@@ -646,6 +662,8 @@ class CryptoCascadesPipeline:
         if cp.has('states') and cp.has('infection_times'):
             self._node_states = cp.load('states')
             self._infection_times_df = cp.load('infection_times')
+            if cp.has('observed_curves'):
+                self._observed_curves = cp.load('observed_curves')
             self.logger.info("Loaded SEIR states from checkpoint")
         else:
             self.logger.info("Assigning SEIR states...")
@@ -705,8 +723,10 @@ class CryptoCascadesPipeline:
                         self._node_states = assigner.wallet_states
                         self._state_assigner = assigner
                         self._infection_times_df = assigner.get_infection_times_df()
+                        self._observed_curves = assigner.get_normalized_state_counts(state_df)
                         cp.save('states', self._node_states)
                         cp.save('infection_times', self._infection_times_df)
+                        cp.save('observed_curves', self._observed_curves)
                     except Exception as e:
                         self.logger.error(f"State assignment failed: {e}")
                         self.logger.info(
@@ -767,86 +787,62 @@ class CryptoCascadesPipeline:
             self.logger.error("Graph not available")
             return
 
-        # Initialize SEIR model with config parameters
-        params = SEIRParameters(
-            beta=self.config.get('seir.beta', 0.3),
-            sigma=self.config.get('seir.sigma', 0.2),
-            gamma=self.config.get('seir.gamma', 0.1),
-            omega=self.config.get('seir.omega', 0.01),
-            fomo_alpha=self.config.get('seir.fomo_alpha', 1.0),
-            fomo_enabled=True
-        )
-        model = NetworkSEIR(params, random_seed=self.random_seed)
-
         N = self._graph.vcount()
-        t_max = self.config.get('simulation.t_max', 100)
-        fgi_array: Optional[np.ndarray] = None
-        if self._fgi_values is not None:
-            fgi_array = np.asarray(self._fgi_values[:t_max])
 
-        # ── Step 1: Mean-field simulation ───────────────────────────
+        # ── Step 1: Use observed SEIR curves from state assignment ──
+        # Instead of running a synthetic mean-field simulation, use the
+        # actual S/E/I/R counts derived from blockchain transaction data.
+        # This produces period-specific trajectories and enables meaningful
+        # parameter estimation (fitting to real data, not self-fitting).
         if cp.has('seir_results'):
             self._seir_results = cp.load('seir_results')
             self.logger.info("Loaded SEIR results from checkpoint")
         else:
-            # Compute network R0
-            r0_network = model.compute_network_r0(self._graph)
-            self.logger.info(f"Network R₀: {r0_network:.3f}")
-
-            initial_infected = max(1, int(N * 0.001))
-            self.logger.info(f"Running mean-field simulation (N={N:,}, T={t_max})...")
-            if self._fgi_is_synthetic:
-                self.logger.warning(
-                    "Simulation β-amplification is based on synthetic sentiment data"
+            if self._observed_curves is not None and not self._observed_curves.empty:
+                self._seir_results = self._observed_curves.copy()
+                if 't' not in self._seir_results.columns:
+                    self._seir_results['t'] = range(len(self._seir_results))
+                # Ensure beta_eff column exists for compatibility
+                if 'beta_eff' not in self._seir_results.columns:
+                    self._seir_results['beta_eff'] = self.config.get('seir.beta', 0.3)
+                cp.save('seir_results', self._seir_results)
+                self.logger.info(
+                    f"Using observed SEIR curves ({len(self._seir_results)} timesteps)"
                 )
-            try:
+            else:
+                # Fallback: synthetic mean-field if no observed data
+                self.logger.warning(
+                    "No observed curves available — falling back to synthetic mean-field"
+                )
+                params = SEIRParameters(
+                    beta=self.config.get('seir.beta', 0.3),
+                    sigma=self.config.get('seir.sigma', 0.2),
+                    gamma=self.config.get('seir.gamma', 0.1),
+                    omega=self.config.get('seir.omega', 0.01),
+                    fomo_alpha=self.config.get('seir.fomo_alpha', 1.0),
+                    fomo_enabled=True
+                )
+                model = NetworkSEIR(params, random_seed=self.random_seed)
+                t_max = self.config.get('simulation.t_max', 100)
+                fgi_array: Optional[np.ndarray] = None
+                if self._fgi_values is not None and not self._fgi_is_synthetic:
+                    fgi_array = np.asarray(self._fgi_values[:t_max])
+                initial_infected = max(1, int(N * 0.001))
                 self._seir_results = model.simulate_meanfield(
-                    N=N,
-                    initial_infected=initial_infected,
-                    t_max=t_max,
-                    fgi_values=fgi_array
+                    N=N, initial_infected=initial_infected,
+                    t_max=t_max, fgi_values=fgi_array
                 )
                 cp.save('seir_results', self._seir_results)
-            except Exception as e:
-                self.logger.error(f"Mean-field simulation failed: {e}")
-                raise
 
         peak_I = self._seir_results['I_frac'].max()
         peak_t = self._seir_results['I_frac'].idxmax()
         self.logger.info(f"Peak infected: {peak_I:.3f} at t={peak_t}")
 
-        # ── Step 2: Monte Carlo simulations ─────────────────────────
-        if n_simulations > 1:
-            if cp.has('mc_results'):
-                self.logger.info("Loaded MC results from checkpoint")
-            else:
-                self.logger.info(f"Running {n_simulations} Monte Carlo simulations...")
-                if N > 5000:
-                    all_names = self._graph.vs['name']
-                    nodes_sample = self.rng.choice(
-                        np.array(all_names), 5000, replace=False
-                    )
-                    sample_set = set(nodes_sample)
-                    n2i = name_to_idx(self._graph)
-                    sample_indices = [n2i[n] for n in nodes_sample if n in n2i]
-                    G_sample = self._graph.induced_subgraph(sample_indices)
-                else:
-                    G_sample = self._graph
-
-                try:
-                    mc_results = model.run_monte_carlo(
-                        G_sample,
-                        initial_infected_count=max(1, int(G_sample.vcount() * 0.01)),
-                        t_max=min(t_max, 50),
-                        n_simulations=min(n_simulations, 20),
-                        fgi_values=np.asarray(self._fgi_values[:50]) if self._fgi_values is not None else None
-                    )
-                    self.logger.info(f"MC mean peak I: {mc_results['I_frac']['mean'].max():.3f}")
-                    # MC results are nested dicts with DataFrames — save as pickle
-                    cp.save('mc_results', mc_results)
-                except Exception as e:
-                    self.logger.warning(f"Monte Carlo simulation failed: {e}")
-                    self.logger.info("Mean-field results preserved in checkpoint")
+        # ── Step 2: HMF validation (computed after parameter estimation)
+        # MC on subsampled graphs is replaced by HMF degree-class ODE
+        # validation in run_estimate(). Save placeholder checkpoint.
+        if not cp.has('mc_results'):
+            cp.save('mc_results', {'method': 'hmf_validation', 'computed_in': 'run_estimate'})
 
         # Save simulation results
         output_file = self.output_dir / 'data' / 'seir_results.csv'
@@ -891,7 +887,7 @@ class CryptoCascadesPipeline:
 
         N = self._graph.vcount()
         fgi_array: Optional[np.ndarray] = None
-        if self._fgi_values is not None:
+        if self._fgi_values is not None and not self._fgi_is_synthetic:
             fgi_array = np.asarray(self._fgi_values)
 
         # ── Step 1: Parameter estimation ────────────────────────────
@@ -902,9 +898,8 @@ class CryptoCascadesPipeline:
             estimator = ParameterEstimator(method='lsq', random_seed=self.random_seed)
             self.logger.info("Estimating SEIR parameters...")
             if self._fgi_is_synthetic:
-                self.logger.warning(
-                    "Parameter estimation using synthetic FGI data — "
-                    "FOMO amplification estimates may not reflect real sentiment"
+                self.logger.info(
+                    "No real FGI data — using constant β (FOMO modulation disabled)"
                 )
             try:
                 self._estimated_params = estimator.estimate(
@@ -955,6 +950,60 @@ class CryptoCascadesPipeline:
             self.logger.info("Parameter sensitivities:")
             for _, row in self._sensitivity_df.iterrows():
                 self.logger.info(f"  {row['parameter']}: elasticity = {row['elasticity']:.4f}")
+
+        # ── Step 3: HMF forward validation ────────────────────────
+        # Run HMF degree-class simulation with fitted params and compare
+        # against observed curves to validate model fit.
+        self.logger.info("Running HMF forward validation...")
+        try:
+            deg_array = np.array(self._graph.degree(), dtype=np.float64)
+            hmf_params = SEIRParameters(
+                beta=self._estimated_params.beta,
+                sigma=self._estimated_params.sigma,
+                gamma=self._estimated_params.gamma,
+                omega=self._estimated_params.omega
+                    if hasattr(self._estimated_params, 'omega')
+                    else self.config.get('seir.omega', 0.01),
+                fomo_alpha=self.config.get('seir.fomo_alpha', 1.0),
+                fomo_enabled=True
+            )
+            hmf_model = NetworkSEIR(hmf_params, random_seed=self.random_seed)
+
+            t_max_obs = len(self._seir_results)
+            I0_obs = max(1, int(self._seir_results['I_frac'].iloc[0] * N))
+            hmf_prediction = hmf_model.simulate_hmf(
+                degree_sequence=deg_array,
+                initial_infected=I0_obs,
+                t_max=t_max_obs,
+                fgi_values=fgi_array,
+            )
+
+            # Validation metrics (manual R² to avoid sklearn dependency)
+            obs_I = self._seir_results['I_frac'].values[:len(hmf_prediction)]
+            pred_I = hmf_prediction['I_frac'].values[:len(obs_I)]
+            ss_res = float(np.sum((obs_I - pred_I) ** 2))
+            ss_tot = float(np.sum((obs_I - obs_I.mean()) ** 2))
+            hmf_r2 = 1.0 - ss_res / max(ss_tot, 1e-10)
+            hmf_nrmse = float(
+                np.sqrt(np.mean((obs_I - pred_I) ** 2))
+                / (obs_I.max() - obs_I.min() + 1e-10)
+            )
+
+            r0_network = hmf_model.compute_network_r0_hmf(deg_array)
+            self.logger.info(
+                f"  HMF validation: R²={hmf_r2:.4f}, NRMSE={hmf_nrmse:.4f}"
+            )
+            self.logger.info(f"  Network-corrected R₀ (HMF): {r0_network:.4f}")
+
+            cp.save('mc_results', {
+                'method': 'hmf_validation',
+                'hmf_prediction': hmf_prediction,
+                'r2': hmf_r2,
+                'nrmse': hmf_nrmse,
+                'r0_network': r0_network,
+            })
+        except Exception as e:
+            self.logger.warning(f"HMF validation failed: {e}")
 
         # Save estimation results
         output_file = self.output_dir / 'data' / 'estimated_params.csv'
@@ -1009,7 +1058,8 @@ class CryptoCascadesPipeline:
                         fgi_array,
                         self._estimated_params,
                         observed_data=self._seir_results,
-                        infection_times_df=infection_times_df
+                        infection_times_df=infection_times_df,
+                        community_partition=self._community_partition
                     )
                     # Override H3 if FGI data is not real
                     if fgi_is_unusable:
@@ -1059,7 +1109,8 @@ class CryptoCascadesPipeline:
                 )
             elif hypothesis == 'H5':
                 self._hypothesis_results['H5'] = tester.test_h5_community_clustering(
-                    self._graph, state_history
+                    self._graph, state_history,
+                    community_partition=self._community_partition
                 )
             elif hypothesis == 'H6':
                 self.logger.info("H6 requires three-period analysis. Use --phase three-period instead.")
@@ -1508,6 +1559,7 @@ class CryptoCascadesPipeline:
             self._seir_results = None
             self._estimated_params = None
             self._hypothesis_results = None
+            self._observed_curves = None
 
             # Run full pipeline for this period
             try:

@@ -96,10 +96,10 @@ class ParameterEstimator:
 
         self.logger = get_logger(__name__)
 
-        # Parameter bounds
+        # Parameter bounds (beta is a rate, not probability — can exceed 1)
         self.bounds = {
-            'beta': (0.01, 1.0),
-            'sigma': (0.01, 1.0),
+            'beta': (0.01, 10.0),
+            'sigma': (0.001, 1.0),
             'gamma': (0.01, 1.0),
             'omega': (0.001, 0.1),
         }
@@ -179,9 +179,10 @@ class ParameterEstimator:
     ) -> EstimationResult:
         """Nonlinear least squares estimation with 4 parameters (β, σ, γ, ω)."""
 
-        # Normalize data
+        # Normalize data and extract initial conditions
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
+        ic = self._extract_initial_conditions(obs_fracs, N)
 
         def residuals(params):
             """Compute residuals between observed and simulated."""
@@ -193,11 +194,8 @@ class ParameterEstimator:
             )
             model = NetworkSEIR(seir_params)
 
-            # Get initial conditions
-            I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
-
-            # Run simulation
-            sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
+            # Run simulation with observed initial conditions
+            sim = self._run_sim(model, N, ic, t_max, fgi_values)
 
             # Compute residuals for all compartments
             res = np.concatenate([
@@ -262,6 +260,7 @@ class ParameterEstimator:
 
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
+        ic = self._extract_initial_conditions(obs_fracs, N)
 
         def neg_log_likelihood(params):
             """Multinomial negative log-likelihood for SEIR compartments."""
@@ -273,8 +272,7 @@ class ParameterEstimator:
             )
             model = NetworkSEIR(seir_params)
 
-            I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
-            sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
+            sim = self._run_sim(model, N, ic, t_max, fgi_values)
 
             # Multinomial log-likelihood: sum_t sum_c obs_count_c(t) * log(sim_frac_c(t))
             eps = 1e-10
@@ -360,8 +358,12 @@ class ParameterEstimator:
 
             bootstrap_df = obs_fracs.iloc[indices].reset_index(drop=True)
 
-            # Resample FGI with same indices to maintain temporal alignment
-            fgi_boot = fgi_values[indices] if fgi_values is not None else None
+            # Resample FGI with same indices, clipping to FGI length
+            if fgi_values is not None:
+                fgi_idx = np.clip(indices, 0, len(fgi_values) - 1)
+                fgi_boot = fgi_values[fgi_idx]
+            else:
+                fgi_boot = None
 
             # Re-estimate from block-bootstrapped series
             initial = {
@@ -415,13 +417,13 @@ class ParameterEstimator:
         
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
-        
+        ic = self._extract_initial_conditions(obs_fracs, N)
+
         # Simulate with fitted parameters
         seir_params = result.to_params()
         model = NetworkSEIR(seir_params)
-        I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
-        sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
-        
+        sim = self._run_sim(model, N, ic, t_max, fgi_values)
+
         # R-squared for Infected compartment
         I_obs = np.asarray(obs_fracs['I_frac'].values)
         I_sim = np.asarray(sim['I_frac'].values)
@@ -455,10 +457,27 @@ class ParameterEstimator:
         
         return result
     
+    @staticmethod
+    def _extract_initial_conditions(obs_fracs: pd.DataFrame, N: int) -> dict:
+        """Extract SEIR initial conditions from the first row of observed data."""
+        I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
+        E0 = int(obs_fracs['E_frac'].iloc[0] * N) if 'E_frac' in obs_fracs.columns else 0
+        R0 = int(obs_fracs['R_frac'].iloc[0] * N) if 'R_frac' in obs_fracs.columns else 0
+        return {'initial_infected': I0, 'initial_exposed': E0, 'initial_recovered': R0}
+
+    def _run_sim(self, model: 'NetworkSEIR', N: int, ic: dict,
+                 t_max: int, fgi_values) -> pd.DataFrame:
+        """Run mean-field simulation with observed initial conditions."""
+        return model.simulate_meanfield(
+            N, ic['initial_infected'], t_max, fgi_values,
+            initial_exposed=ic['initial_exposed'],
+            initial_recovered=ic['initial_recovered'],
+        )
+
     def _normalize_data(self, data: pd.DataFrame, N: int) -> pd.DataFrame:
         """Ensure data is in fraction form."""
         df = data.copy()
-        
+
         if 'S_frac' not in df.columns:
             df['S_frac'] = df['S'] / N
             df['E_frac'] = df['E'] / N
@@ -499,7 +518,8 @@ class ParameterEstimator:
         
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
-        
+        ic = self._extract_initial_conditions(obs_fracs, N)
+
         for i, beta in enumerate(beta_vals):
             for sigma in sigma_vals:
                 for gamma in gamma_vals:
@@ -508,9 +528,7 @@ class ParameterEstimator:
                         fomo_enabled=fgi_values is not None
                     )
                     model = NetworkSEIR(seir_params)
-                    
-                    I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
-                    sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
+                    sim = self._run_sim(model, N, ic, t_max, fgi_values)
                     
                     # Mean squared error
                     mse = 0.0
@@ -557,12 +575,12 @@ class ParameterEstimator:
         
         obs_fracs = self._normalize_data(observed_data, N)
         t_max = len(observed_data)
-        
+        ic = self._extract_initial_conditions(obs_fracs, N)
+
         def compute_mse(params_dict):
             seir_params = SEIRParameters(**params_dict, fomo_enabled=fgi_values is not None)
             model = NetworkSEIR(seir_params)
-            I0 = max(1, int(obs_fracs['I_frac'].iloc[0] * N))
-            sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
+            sim = self._run_sim(model, N, ic, t_max, fgi_values)
             
             mse = sum(
                 np.mean((np.asarray(sim[f'{col}_frac'].values) - np.asarray(obs_fracs[f'{col}_frac'].values)) ** 2)
@@ -576,16 +594,19 @@ class ParameterEstimator:
         results = []
         for param_name in ['beta', 'sigma', 'gamma']:
             base_val = base_params[param_name]
-            
-            # Perturb up
+
+            # Perturb up/down, clamping to valid range
             params_up = base_params.copy()
-            params_up[param_name] = base_val * (1 + perturbation)
-            mse_up = compute_mse(params_up)
-            
-            # Perturb down
+            params_up[param_name] = max(1e-6, base_val * (1 + perturbation))
             params_down = base_params.copy()
-            params_down[param_name] = base_val * (1 - perturbation)
-            mse_down = compute_mse(params_down)
+            params_down[param_name] = max(1e-6, base_val * (1 - perturbation))
+
+            try:
+                mse_up = compute_mse(params_up)
+                mse_down = compute_mse(params_down)
+            except Exception:
+                mse_up = base_mse
+                mse_down = base_mse
             
             # Sensitivity index (normalized gradient)
             sensitivity = (mse_up - mse_down) / (2 * perturbation * base_val)
@@ -753,10 +774,12 @@ class ParameterEstimator:
         seir_params = est_result.to_params()
         model = NetworkSEIR(seir_params)
         t_max = len(data)
-        I0 = max(1, int(data['I_frac'].iloc[0] * N))
+        ic = self._extract_initial_conditions(
+            self._normalize_data(data, N), N
+        )
 
         try:
-            sim = model.simulate_meanfield(N, I0, t_max, fgi_values)
+            sim = self._run_sim(model, N, ic, t_max, fgi_values)
         except Exception:
             return float('inf'), float('-inf')
 
