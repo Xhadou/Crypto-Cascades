@@ -37,6 +37,7 @@ env/
 *.swo
 CLAUDE.md
 docs/plans/
+docs/superpowers/
 
 # Jupyter
 .ipynb_checkpoints/
