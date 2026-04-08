@@ -72,7 +72,7 @@ pip install -e ".[bayesian,fast,viz,dev]"
 ### 4. Verify Installation
 
 ```bash
-python -c "import networkx; import scipy; import pandas; print('Core packages OK')"
+python -c "import igraph; import scipy; import pandas; print('Core packages OK')"
 python -m pytest tests/ -v --co -q  # List all tests without running
 ```
 
@@ -94,7 +94,7 @@ You rarely need to edit this file for a first run — the defaults are tuned for
 
 ## Running the Pipeline
 
-The pipeline has 9 phases, orchestrated by `src/main.py`. You can run everything at once or phase by phase.
+The pipeline has 7 phases plus a special three-period analysis mode, orchestrated by `src/main.py`. You can run everything at once or phase by phase.
 
 ### Full Pipeline
 
@@ -105,30 +105,30 @@ python -m src.main --phase all --config configs/config.yaml
 ### Phase by Phase
 
 ```bash
-# 1. Download datasets (ORBITAAL samples, SNAP, market data, sentiment)
+# Phase 1: Download datasets (ORBITAAL samples, SNAP, market data, sentiment)
 python -m src.main --phase download
 
-# 2. Parse raw data and build transaction graphs
+# Phase 2: Parse raw data and build igraph transaction graphs
 python -m src.main --phase preprocess --start-date 2017-10-01 --end-date 2018-01-31
 
-# 3. Compute network metrics (centrality, communities, degree distributions)
+# Phase 3-4: Network analysis + SEIR state assignment (combined)
 python -m src.main --phase analyze
 
-# 4. Run SEIR simulations (ODE + Gillespie stochastic)
-python -m src.main --phase simulate --n-simulations 100
+# Phase 5: Run HMF degree-class ODE simulation (BDF solver)
+python -m src.main --phase simulate
 
-# 5. Estimate parameters (β, σ, γ, ω) with bootstrap CIs
+# Phase 6: Estimate parameters (β, σ, γ, ω) with bootstrap CIs
 python -m src.main --phase estimate
 
-# 6. Test hypotheses H1–H6 with FDR correction
+# Phase 7: Test hypotheses H1–H5 with FDR correction
 python -m src.main --phase test
 # Or test a single hypothesis:
 python -m src.main --phase test --hypothesis H1
 
-# 7. Generate publication figures
+# Phase 8: Generate publication figures
 python -m src.main --phase visualize
 
-# 8. Run the three-period comparative analysis (training vs control vs validation)
+# Three-period analysis: full Training/Control/Validation pipeline (includes H6)
 python -m src.main --phase three-period
 ```
 
@@ -137,13 +137,13 @@ python -m src.main --phase three-period
 | Phase | Output Location | Key Outputs |
 |-------|----------------|-------------|
 | `download` | `data/raw/` | Parquet files, CSV trust networks, price/sentiment data |
-| `preprocess` | `data/processed/` | Cleaned transaction DataFrames, NetworkX graphs |
-| `analyze` | `outputs/reports/` | Centrality scores, community assignments, degree distributions |
-| `simulate` | `outputs/models/` | ODE trajectories, Gillespie simulation results |
-| `estimate` | `outputs/models/` | Fitted parameters (β, σ, γ, ω), R₀ estimates, bootstrap CIs |
-| `test` | `outputs/reports/` | H1–H6 results: test statistics, p-values, effect sizes |
-| `visualize` | `outputs/figures/` | SEIR curves, network plots, hypothesis result figures |
-| `three-period` | `outputs/reports/` | Cross-period comparison CSV, rolling R₀ estimates |
+| `preprocess` | `results/data/` | Cleaned transaction DataFrames, igraph objects |
+| `analyze` | `results/data/` | Centrality scores, community assignments, state assignments, observed curves |
+| `simulate` | `results/data/` | HMF degree-class ODE trajectories |
+| `estimate` | `results/data/` | Fitted parameters (β, σ, γ, ω), R₀ estimates, bootstrap CIs |
+| `test` | `results/reports/` | H1–H5 results: test statistics, p-values, effect sizes |
+| `visualize` | `results/figures/` | SEIR curves, network plots, hypothesis result figures |
+| `three-period` | `results/periods/` | Per-period results, cross-period comparison CSV, H6 results |
 
 ## Understanding the Results
 
@@ -155,7 +155,7 @@ After estimation, the key fitted parameters are:
 - **σ (sigma):** Incubation rate — 1/σ is the average time a wallet stays in the Exposed state
 - **γ (gamma):** Recovery rate — 1/γ is the average duration of active buying (Infected state)
 - **ω (omega):** Immunity waning rate — 1/ω is how long recovered wallets stay dormant
-- **R₀ = β/γ:** Basic reproduction number — values > 1 indicate epidemic spreading
+- **R₀:** Basic reproduction number — homogeneous R₀ = β/γ; network-corrected R₀ = β⟨k²⟩/(⟨k⟩γ). Values > 1 indicate epidemic spreading
 
 ### Hypothesis Results
 
@@ -166,13 +166,16 @@ Each hypothesis test reports:
 - **Reject/fail-to-reject** decision at α = 0.05
 
 The three-period design provides the critical validation: if FOMO genuinely follows epidemic dynamics, you should see:
+
 1. Strong SEIR fit during **training** (2017 bull run)
 2. Suppressed transmission during **control** (2018 bear market)
 3. Generalized fit during **validation** (2020 bull run)
 
+> **Note:** The Fear & Greed Index (FGI) is only available from ~October 2020 onward. For the training and control periods, FGI is synthetic (random). H3 (FGI correlation) is automatically marked inconclusive for periods without real FGI data. H6 (cross-period R₀ comparison) is only tested via `--phase three-period`, not `--phase test`.
+
 ### Figures
 
-Generated figures in `outputs/figures/` include:
+Generated figures in `results/figures/` include:
 - SEIR compartment curves (observed vs fitted)
 - Network topology visualizations
 - R₀ comparison across periods
@@ -200,12 +203,12 @@ pytest tests/ --cov=src --cov-report=term-missing
 ```
 
 The test suite has 430+ tests covering:
-- SEIR ODE and Gillespie simulation correctness
+- SEIR ODE and HMF simulation correctness
 - State assignment logic (z-score, exposure timeout, transitions)
 - Parameter estimation (bootstrap, MLE, Bayesian)
-- All six hypothesis tests (H1–H6)
-- Network analysis (Leiden/Louvain, centrality, topology)
-- Data parsing (ORBITAAL, graph construction)
+- Hypothesis tests (H1–H6)
+- Network analysis (Leiden, k-shell centrality, topology)
+- Data parsing (ORBITAAL, igraph construction)
 - Configuration validation (Pydantic schema)
 
 ## Development
@@ -230,8 +233,8 @@ ruff format src/ tests/
 
 The `SEIRParameters` dataclass in `src/epidemic_model/network_seir.py` holds all model parameters. To add a new compartment or modify dynamics:
 
-1. Update the `_seir_ode()` method (called by `solve_ivp`)
-2. Update the Gillespie event rates in `_gillespie_step()`
+1. Update the `_seir_ode()` method (homogeneous mean-field, called by `solve_ivp`)
+2. Update the HMF degree-class ODE in `simulate_hmf()` (heterogeneous mean-field)
 3. Add corresponding parameters to `SEIRParameters` and `configs/config.yaml`
 
 ## Troubleshooting
