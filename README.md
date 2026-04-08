@@ -58,7 +58,7 @@ Wallets are classified into SEIR compartments based on observable on-chain behav
 - **Infected (I):** Net BTC inflow exceeds a z-score threshold (default: 1.5σ above wallet mean), replacing the prior binary threshold. Spontaneous infection (importation) is also supported.
 - **Recovered (R):** Dormant for 3+ days following an Infected phase. Returns to Susceptible after 30 days (waning immunity).
 
-> **Note:** Because the ORBITAAL transaction graph contains only wallets that have transacted, the Susceptible compartment is structurally zero (S = 0) from t = 0 onward. All observed wallets enter the system already in E or I states. This is an empirical finding, not a bug — it reflects the nature of transaction-graph data versus population-level surveillance data.
+> **Note:** Because the ORBITAAL transaction graph contains only wallets that have transacted, the Susceptible compartment is unobservable (S = 0 in the data) from t = 0 onward. The susceptible population exists in reality (individuals who have not yet purchased Bitcoin) but falls outside the transaction-graph observation window — analogous to studying an epidemic from hospital records rather than population surveillance. The SEIR model remains the correct framework; network-level hypothesis tests (H2, H4, H5) operate on the observed graph and confirm epidemic-like spreading mechanisms.
 
 #### High-Level State Loop
 

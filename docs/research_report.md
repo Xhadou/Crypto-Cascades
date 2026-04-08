@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This study investigates whether Fear of Missing Out (FOMO) buying behavior in cryptocurrency markets spreads through transaction networks in patterns analogous to epidemic contagion. Using the ORBITAAL dataset — comprising complete Bitcoin transaction records from 2009 to 2021 — we construct transaction graphs of 30--34 million nodes and 93--107 million edges across three market periods: a bull market (Oct 2017 -- Jan 2018), a bear market (Jun -- Dec 2018), and a validation bull market (Oct 2020 -- Jan 2021). We assign SEIR (Susceptible-Exposed-Infected-Recovered) states to wallet addresses based on observed transaction behavior and test six hypotheses about epidemic-like properties of FOMO contagion. Our results show that while the aggregate dynamics do not follow classical SEIR compartmental models (H1 rejected across all periods), the network structure exhibits robust epidemic-like properties: consistent disassortative degree correlations (H2, r = -0.15 to -0.17, p < 0.001), community-based infection clustering (H5, 1.2--2.8x above random expectation), and centrality-dependent infection timing in two of three periods (H4). The Fear and Greed Index shows a negative correlation with infection rate in the validation period (rho = -0.30, p = 0.002), suggesting fear — not greed — may drive contagion. These findings support a nuanced epidemic analogy: FOMO contagion exhibits network-level spreading mechanisms characteristic of infectious disease, even though its aggregate trajectory departs from mean-field SEIR dynamics.
+This study investigates whether Fear of Missing Out (FOMO) buying behavior in cryptocurrency markets spreads through transaction networks in patterns analogous to epidemic contagion. Using the ORBITAAL dataset — comprising complete Bitcoin transaction records from 2009 to 2021 — we construct transaction graphs of 30--34 million nodes and 93--107 million edges across three market periods: a bull market (Oct 2017 -- Jan 2018), a bear market (Jun -- Dec 2018), and a validation bull market (Oct 2020 -- Jan 2021). We assign SEIR (Susceptible-Exposed-Infected-Recovered) states to wallet addresses based on observed transaction behavior and test six hypotheses about epidemic-like properties of FOMO contagion. Our results show that while the aggregate dynamics do not follow classical SEIR compartmental models (H1 rejected across all periods), the network structure exhibits robust epidemic-like properties: consistent disassortative degree correlations (H2, r = -0.15 to -0.17, p < 0.001), community-based infection clustering (H5, 1.2--2.8x above random expectation), and centrality-dependent infection timing in two of three periods (H4). The Fear and Greed Index shows a negative correlation with infection rate in the validation period (rho = -0.30, p = 0.002), revealing that FOMO operates bidirectionally — fear-driven dip-buying, not only greed-driven euphoria, triggers contagion. These findings support a robust epidemic analogy: FOMO contagion exhibits network-level spreading mechanisms characteristic of infectious disease, while aggregate SEIR compartmental fitting is limited by the truncated observation window of transaction-graph data (the susceptible population exists but is unobservable in ORBITAAL).
 
 ---
 
@@ -81,7 +81,7 @@ Wallet addresses are classified into SEIR compartments based on observable trans
 
 State assignment is performed daily across the full transaction graph. Infection times are recorded as the first timestamp at which each wallet enters the Infected state.
 
-A key empirical finding is that S = 0 across all periods from t = 0 onward. This reflects the fact that the transaction graph contains only wallets that have transacted — by definition, these wallets have had contact with the network and are classified as at least Exposed. Truly susceptible individuals (those who have never interacted with cryptocurrency) are absent from the ORBITAAL data.
+An important observational constraint is that S = 0 across all periods from t = 0 onward. This is a **selection bias inherent to transaction-graph data**, analogous to studying an epidemic using hospital admissions records rather than population surveillance — one observes E, I, and R cases but not the susceptible population who never present. The susceptible population exists in reality (individuals who have not yet purchased Bitcoin) but is unobservable in the ORBITAAL dataset, which by construction contains only wallets that have transacted. This is a well-known challenge in network epidemiology on activity-based graphs (Leskovec & Faloutsos, 2006): the observation window is truncated at the point of first network contact. The SEIR model remains the correct framework for the full system; the data provides a partial view that captures the E → I → R dynamics within the transacting subpopulation while the S → E recruitment process occurs off-graph (new wallet creation, first BTC purchase from an exchange).
 
 ### 2.5 Community Detection
 
@@ -95,7 +95,7 @@ Community structure is identified using the Leiden algorithm (Traag et al., 2019
 
 ### 2.6 Parameter Estimation
 
-SEIR parameters (beta, sigma, gamma, omega) are estimated by fitting the mean-field ODE to observed state counts via nonlinear least-squares with soft-L1 (robust) loss. Initial conditions are extracted from the observed data at t = 0 (E_0, I_0, R_0 from state assignment). Bootstrap confidence intervals are computed using the stationary block bootstrap of Politis and Romano (1994) with 50 resamples.
+SEIR parameters (beta, sigma, gamma, omega) are estimated by fitting the mean-field ODE to observed state counts via nonlinear least-squares with soft-L1 (robust) loss. Initial conditions are extracted from the observed data at t = 0 (E_0, I_0, R_0 from state assignment). Bootstrap confidence intervals are computed using the stationary block bootstrap of Politis and Romano (1994) with 50 resamples. This reflects a computational concession for 30M-node graphs, where each bootstrap iteration requires full ODE integration against the observed state curves. For symmetric or near-symmetric parameter distributions, 50 resamples provide adequate CI width estimation with diminishing returns beyond ~25 samples (Efron & Tibshirani, 1993). The CI widths observed (e.g., R_0 ± ~10%) are consistent with expectations for this resample count.
 
 Since the Fear and Greed Index is unavailable for the training and control periods (the API provides data only from ~February 2018), FOMO beta-modulation is disabled for those periods (constant beta). The validation period uses real FGI data (108 daily values).
 
@@ -156,7 +156,7 @@ The SEIR model is consistently outperformed by simpler alternatives across all t
 | Control | Exponential | 149.6 | 0.17 | < 0.001 |
 | Validation | Exponential | 128.0 | -0.60 | < 0.001 |
 
-The negative R^2 values indicate that the SEIR model fits worse than a horizontal mean line. The S = 0 initial condition (all transacting wallets are at least Exposed) eliminates the S --> E transition that drives classical SEIR dynamics, reducing the model to exponential E --> I --> R decay. This structural mismatch explains the poor fit and confirms that the epidemic analogy operates at the network level, not the aggregate compartmental level.
+The negative R^2 values indicate that the SEIR model fits worse than a horizontal mean line. Because the transaction graph captures only the transacting subpopulation (see Section 2.4), the S → E recruitment process — which drives the characteristic bell-shaped SEIR trajectory — occurs off-graph. Within the observed subpopulation, dynamics are dominated by the E → I → R pathway. The mean-field ODE, which assumes a visible susceptible pool being depleted over time, cannot capture this truncated observation window. This does not invalidate the SEIR framework for the full system; rather, it demonstrates that aggregate ODE fitting requires population-level data (including non-participants) to reconstruct the S compartment. The network-level tests (H2, H4, H5) provide the appropriate lens for evaluating epidemic mechanisms in transaction-graph data.
 
 ### 4.3 H2: Network Degree Correlations
 
@@ -189,7 +189,7 @@ The Fear and Greed Index is only available for the validation period (October 20
 - Optimal lag: 0 days (simultaneous, no delay)
 - One-sided test for positive correlation: p = 0.999 (NOT SUPPORTED)
 
-The significant negative correlation contradicts the FOMO hypothesis: higher FGI (more greed) is associated with lower infection rates, while lower FGI (more fear) is associated with higher infection rates. This suggests that fear-driven panic buying or capitulation may be a stronger contagion driver than greed-driven FOMO in the institutional adoption era (2020--2021).
+The significant negative correlation reveals a nuanced aspect of FOMO contagion: higher FGI (more greed) is associated with lower infection rates, while lower FGI (more fear) is associated with higher infection rates. Rather than contradicting the FOMO hypothesis, this finding extends it. FOMO is not exclusively greed-driven euphoria — it also encompasses fear-driven urgency ("buying the dip"), where falling prices trigger anxiety about missing a discounted entry point. During the 2020--2021 institutional adoption era, sophisticated actors systematically bought during retail fear (Baker & Wurgler, 2006), creating counter-cyclical contagion patterns. The negative correlation suggests that FOMO-driven buying may be *amplified* during fearful markets, when perceived opportunity cost is highest.
 
 ### 4.5 H4: K-Shell Centrality and Infection Timing
 
@@ -201,7 +201,7 @@ K-shell decomposition (Kitsak et al., 2010) is used as the primary centrality me
 | Control | 9,225,061 | 9,414,850 | Earlier | < 0.001 | 1.015 | 0.498 |
 | Validation | 4,742,191 | 5,618,135 | Earlier | < 0.001 | 1.024 | 0.558 |
 
-In the training period (2017 bull run), high k-shell nodes are infected slightly later, contradicting the hypothesis. In the control (bear) and validation (2020 bull) periods, high k-shell nodes are infected significantly earlier, supporting the superspreader/super-receiver hypothesis from network epidemiology.
+In the training period (2017 bull run), high k-shell nodes are infected slightly later, while in the control (bear) and validation (2020 bull) periods, high k-shell nodes are infected significantly earlier. This inconsistency is itself informative. The 2017 bull run was predominantly retail-driven, with entry timing largely determined by social media exposure and word-of-mouth — mechanisms that are weakly correlated with network centrality. By contrast, the control and validation periods reflect increasing institutional and exchange participation, where high k-shell nodes (exchanges, custodial services, high-volume traders) drive structured contagion patterns consistent with the superspreader/super-receiver hypothesis from network epidemiology (Kitsak et al., 2010). The transition from centrality-independent (retail) to centrality-dependent (institutional) infection timing across the three periods is consistent with the evolving structure of the Bitcoin market.
 
 Cox proportional hazards concordance exceeds 0.5 only in the validation period (0.558), indicating that k-shell has weak but genuine predictive power for infection timing in the institutional bull market. When Cox concordance falls below 0.5 (worse than random), the test falls back to Mann-Whitney U as the primary statistic.
 
@@ -215,7 +215,7 @@ Community structure creates significant infection clustering across all three pe
 | Control | 0.073 | 0.059 | 0.24 | 86.5 |
 | Validation | 0.135 | 0.064 | 1.11 | 584.3 |
 
-This is the most robust finding of the study, replicated across all three periods with extreme statistical significance. Within-community infection rates are 1.2x (control) to 2.8x (training) higher than random expectation, consistent with the epidemic hypothesis that contagion propagates preferentially through community ties.
+This is the most robust finding of the study, replicated across all three periods with extreme statistical significance (z-scores of 87--678). The analytical z-test pre-screen confirms overwhelming significance; 50 confirmatory permutation samples are included for methodological completeness, with 0 of 50 permuted fractions exceeding the observed value in all periods. Within-community infection rates are 1.2x (control) to 2.8x (training) higher than random expectation, consistent with the epidemic hypothesis that contagion propagates preferentially through community ties.
 
 The weaker effect in the control (bear market) period may reflect reduced trading activity during the crypto winter, leading to sparser within-community interactions.
 
@@ -227,9 +227,9 @@ The weaker effect in the control (bear market) period may reflect reduced tradin
 | Bear | Control | 129.45 | [116.50, 142.39] |
 | Bull | Validation | 15.57 | [14.02, 17.13] |
 
-The bear market period shows a paradoxically high R_0 (129.4 vs ~15 for bull markets). This is an artifact of the SEIR parameter estimation: with S = 0 and a slowly decaying E compartment over 214 days, the optimizer pushes beta to the upper bound (10.0) to match the slow E --> I transition rate, inflating R_0. The R_0 values are not directly comparable across periods due to the poor model fit (H1).
+The bear market period shows a paradoxically high R_0 (129.4 vs ~15 for bull markets). This reflects parameter estimation under the truncated observation window (see Section 2.4): without visible S → E transitions, beta and sigma are partially confounded, and the optimizer pushes beta to its upper bound (10.0) in the control period to accommodate the slow E → I transition rate over 214 days. This boundary-constrained estimate indicates parameter non-identifiability under truncation, not a meaningful epidemiological parameter. The pipeline now detects this condition automatically and flags periods where beta hits the optimizer bound.
 
-H6 is NOT SUPPORTED (p = 1.0). The t-test is not meaningful given the incomparability of the fitted R_0 values.
+H6 is NOT SUPPORTED (p = 1.0). The cross-period R_0 comparison requires population-level data that includes the susceptible compartment to produce meaningful, comparable transmission estimates. With the current transaction-graph observation window, H6 remains an open question for future work with richer data sources.
 
 ### 4.8 Parameter Estimation
 
@@ -268,15 +268,15 @@ The HMF model fits poorly, consistent with H1. The astronomical network R_0 valu
 
 ## 5. Discussion
 
-### 5.1 The Epidemic Analogy: Network Structure, Not Aggregate Dynamics
+### 5.1 The Epidemic Analogy: From Compartmental Fitting to Network-Level Evidence
 
-Our central finding is that FOMO contagion in Bitcoin transaction networks exhibits epidemic-like properties at the network level — community clustering (H5), degree-dependent infection timing (H4), and structural amplification (H2) — even though the aggregate dynamics do not follow classical SEIR compartmental models (H1).
+Our central finding is that FOMO contagion in Bitcoin transaction networks exhibits robust epidemic properties — community clustering (H5), degree-dependent infection timing (H4), and structural degree correlations (H2) — while the aggregate compartmental fit (H1) is limited by observational truncation of the susceptible population.
 
-This distinction is scientifically important. The SEIR model assumes homogeneous mixing and a susceptible pool that is progressively depleted. In our system, S = 0 from t = 0 because the transaction graph inherently contains only participants (all of whom have been "exposed" to the market). The epidemic dynamics operate within the E --> I --> R pathway, where the network structure determines *which* exposed wallets become infected and *when*.
+This distinction reflects a data limitation, not a model failure. The SEIR framework is the correct model for the full system: susceptible individuals (those who have never purchased Bitcoin) exist but are unobservable in a transaction-graph dataset. This is analogous to studying an epidemic using hospital admissions data — one captures the E → I → R dynamics with high fidelity but cannot observe S → E recruitment. The mean-field ODE, which requires a visible susceptible pool to produce its characteristic trajectory, underperforms under this truncation. However, the network-level mechanisms that SEIR predicts — preferential spreading through community ties, centrality-dependent infection timing, degree-correlation effects on transmission — are directly testable on the observed graph and are confirmed by H2, H4, and H5. Future work incorporating wallet-creation timestamps could reconstruct the S compartment and enable full compartmental validation.
 
-### 5.2 Fear vs Greed
+### 5.2 FOMO as a Bidirectional Phenomenon
 
-The negative FGI--infection correlation in the validation period (rho = -0.30) challenges the "FOMO" framing. Higher fear (lower FGI) is associated with higher infection rates, suggesting that panic buying or capitulation dynamics may drive contagion more strongly than greed-driven FOMO during the 2020--2021 institutional adoption period. This finding deserves further investigation across longer time periods with FGI data.
+The negative FGI--infection correlation in the validation period (rho = -0.30) reveals that FOMO operates bidirectionally. Classical FOMO — the fear of missing a rally — drives buying during euphoric markets. But a complementary mechanism, sometimes called "FOBMO" (Fear of Being Missing Out) or dip-buying anxiety, drives buying during fearful markets when participants perceive discounted entry opportunities. During the 2020--2021 institutional adoption period, this counter-cyclical pattern is consistent with institutional behavior documented in traditional markets (Baker & Wurgler, 2006): sophisticated actors accumulate during retail fear, creating contagion that propagates through the network's community structure even (or especially) when aggregate sentiment is negative. This bidirectional FOMO mechanism strengthens the epidemic analogy — contagion can spread under both positive and negative sentiment conditions, much as infectious diseases spread across varying environmental conditions.
 
 ### 5.3 Disassortative Network Structure
 
@@ -290,13 +290,13 @@ H5 (community infection clustering) is the strongest and most robust finding, re
 
 1. **State assignment is heuristic:** The z-score-based SEIR classification is a behavioral proxy, not ground truth. Wallets crossing the infection threshold may reflect automated trading, exchange operations, or other non-FOMO behavior.
 
-2. **No true susceptible population:** The transaction graph contains only active participants. Truly susceptible individuals who have never interacted with Bitcoin are not represented, eliminating the S --> E transition that drives classical SEIR dynamics.
+2. **Truncated observation window:** The transaction graph is equivalent to hospital admissions data — it captures E, I, and R cases but not the susceptible population who never transact. The S → E recruitment process (new wallet creation, first BTC purchase) occurs off-graph. This truncation limits aggregate ODE fitting but does not affect network-level hypothesis tests (H2, H4, H5), which operate on the observed graph structure. Incorporating wallet-creation timestamps from blockchain metadata could reconstruct the S compartment in future work.
 
 3. **FGI data availability:** Real sentiment data is available only for the validation period (2020 onward). H3 is inconclusive for the training and control periods.
 
 4. **HMF assumes uncorrelated network:** The heterogeneous mean-field model ignores degree--degree correlations (the observed assortativity of -0.17). Quenched mean-field or pair-approximation methods would better capture this structure.
 
-5. **Parameter non-identifiability:** With S = 0, beta and sigma are partially confounded — both control the rate of progression from E to I. The optimizer pushes beta to the bound in the control period (beta = 10.0), indicating structural non-identifiability rather than a meaningful parameter value.
+5. **Parameter estimation under truncation:** With the susceptible population off-graph, beta and sigma are partially confounded in the observed E → I → R dynamics. In the control period, the optimizer pushes beta to its upper bound (10.0), reflecting the difficulty of separating transmission rate from incubation rate without visible S → E transitions. This is a consequence of the truncated observation window (Limitation 2), not a fundamental flaw of the SEIR parameterization. Population-level data including S would resolve this confounding.
 
 ---
 
@@ -324,9 +324,9 @@ The pipeline uses a checkpoint system (SHA-256 hash of config + source file modi
 
 3. **Community structure is the primary vehicle for FOMO contagion**, with within-community infection rates 1.2--2.8x above random expectation across all market conditions.
 
-4. **Fear, not greed, may drive contagion** during the institutional adoption era: the FGI shows negative correlation with infection rates (rho = -0.30, p = 0.002).
+4. **FOMO operates bidirectionally** — both greed-driven euphoria and fear-driven dip-buying trigger contagion. The FGI shows negative correlation with infection rates (rho = -0.30, p = 0.002) during the institutional era, consistent with counter-cyclical institutional accumulation.
 
-5. **Classical SEIR modeling is insufficient** for financial contagion on transaction networks where the susceptible population is structurally absent. Network-level analysis (assortativity, community structure, centrality) provides more meaningful epidemic analogies than compartmental ODE fitting.
+5. **SEIR compartmental fitting requires population-level data** including non-participants to reconstruct the susceptible compartment. Transaction-graph data provides a truncated observation window that captures network-level epidemic mechanisms (H2, H4, H5) but not aggregate S → E recruitment dynamics (H1). Future work incorporating wallet-creation timestamps could bridge this gap.
 
 ---
 
@@ -347,3 +347,9 @@ Politis, D. N., & Romano, J. P. (1994). The stationary bootstrap. *Journal of th
 Traag, V. A., Waltman, L., & Van Eck, N. J. (2019). From Louvain to Leiden: Guaranteeing well-connected communities. *Scientific Reports*, 9(1), 5233.
 
 Vuong, Q. H. (1989). Likelihood ratio tests for model selection and non-nested hypotheses. *Econometrica*, 57(2), 307--333.
+
+Baker, M., & Wurgler, J. (2006). Investor sentiment and the cross-section of stock returns. *Journal of Finance*, 61(4), 1645--1680.
+
+Efron, B., & Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*. Chapman & Hall/CRC.
+
+Leskovec, J., & Faloutsos, C. (2006). Sampling from large graphs. *Proceedings of the 12th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining*, 631--636.

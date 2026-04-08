@@ -1624,17 +1624,43 @@ class CryptoCascadesPipeline:
         self.logger.info("=" * 60)
         
         if r0_bull_markets and r0_bear_market is not None:
+            # Check for parameter non-identifiability (beta hitting upper bound)
+            beta_upper = 10.0  # matches estimator param_bounds
+            non_identifiable = []
+            for name, res in period_results.items():
+                if name == 'h6_test':
+                    continue
+                ep = res.get('estimated_params')
+                if ep is not None and getattr(ep, 'beta', 0) >= beta_upper * 0.99:
+                    non_identifiable.append(name)
+
+            if non_identifiable:
+                self.logger.warning(
+                    f"Parameter non-identifiability in {non_identifiable}: "
+                    f"β hit upper bound ({beta_upper}). R₀ values may not be comparable."
+                )
+
             h6_result = tester.test_h6_market_condition_r0(
                 r0_bull_markets=r0_bull_markets,
                 r0_bear_market=r0_bear_market
             )
-            
+
+            if non_identifiable:
+                h6_result.additional_metrics['non_identifiable_periods'] = non_identifiable
+                h6_result.additional_metrics['non_identifiability_note'] = (
+                    f"β hit optimizer upper bound in {non_identifiable}. "
+                    f"R₀ comparison may reflect parameter boundary constraints, "
+                    f"not genuine market-condition differences."
+                )
+
             self.logger.info(f"H6 Result: {'SUPPORTED' if h6_result.reject_null else 'NOT SUPPORTED'}")
             self.logger.info(f"  p-value: {h6_result.p_value:.4f}")
             self.logger.info(f"  Effect size (Cohen's d): {h6_result.effect_size:.3f}")
             self.logger.info(f"  Bull market mean R₀: {np.mean(r0_bull_markets):.3f}")
             self.logger.info(f"  Bear market R₀: {r0_bear_market:.3f}")
-            
+            if non_identifiable:
+                self.logger.info(f"  ⚠ Non-identifiable periods: {non_identifiable}")
+
             period_results['h6_test'] = h6_result
         else:
             self.logger.warning("Insufficient data for H6 test (need both bull and bear markets)")
